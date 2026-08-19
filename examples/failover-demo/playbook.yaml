@@ -1,0 +1,32 @@
+# Failover demo — watch a usage-limited agent hand its prompt to the next one.
+#
+# The trick: CODEX_BIN points at a fake codex that ALWAYS reports a usage
+# limit, so you can watch the failover without needing a real exhausted quota.
+# Run it from this directory (see README.md):
+#
+#   PowerShell:  $env:CODEX_BIN = "$PWD\fake-codex.bat"; agent-playbook playbook.yaml
+#   bash/zsh:    CODEX_BIN=./fake-codex.sh agent-playbook playbook.yaml
+#
+# Expected log:
+#   running prompt #1 [codex] (new session) attempt 1
+#   [codex] usage limit — switching to next agent
+#   running prompt #1 [claude] (new session) attempt 2
+#   DONE prompt #1 [claude]
+#
+# Re-run from scratch with --restart. Afterwards, `agent-playbook --windows`
+# shows the recorded codex limit event.
+
+notify_backend: none
+defaults:
+  cwd: .
+  permission_mode: dontAsk
+  allowed_tools: [Read, Write, Edit]
+  agent: codex                 # primary: the fake, always-limited codex
+  fallback_agents: [claude]    # rescue: your real Claude subscription
+  models: { claude: haiku }    # keep the demo nearly free
+
+instructions:
+  - prompt: >
+      Create a file named rescued.txt containing exactly this one line:
+      saved by the fallback agent
+      If it already exists with that content, change nothing.
