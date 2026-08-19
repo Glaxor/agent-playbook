@@ -118,6 +118,11 @@ def test_mcp_start_status_stop_cycle(stub, tmp_path, monkeypatch):
         # check itself must not kill it (the old Windows bug)
         assert wait_for(lambda: playbook_mcp.core_status(str(pb))["done_instructions"] == 1,
                         timeout=60)
+        # wait until prompt #2 has actually hit the limit and the runner is
+        # parked in the wait — stopping earlier would race the log assertion below
+        assert wait_for(lambda: any("USAGE LIMIT" in l for l in
+                                    playbook_mcp.core_logs(str(pb), lines=50).get("lines", [])),
+                        timeout=60)
         st = playbook_mcp.core_status(str(pb))
         assert st["phase"] == "running" and st["running"] is True
         assert playbook_mcp._alive(pid), "status check killed the runner!"
