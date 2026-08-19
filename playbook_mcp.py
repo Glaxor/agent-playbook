@@ -51,13 +51,14 @@ def runner_cmd() -> list[str]:
     if os.environ.get("CLAUDE_RUNNER"):
         p = os.path.expanduser(os.environ["CLAUDE_RUNNER"])
         return [sys.executable, p] if p.endswith(".py") else [p]
-    if shutil.which("claude-runner"):
-        return ["claude-runner"]
+    for exe in ("agent-playbook", "claude-runner"):
+        if shutil.which(exe):
+            return [exe]
     sibling = Path(__file__).resolve().parent / "claude_runner.py"
     if sibling.exists():
         return [sys.executable, str(sibling)]
     raise FileNotFoundError(
-        "Can't find the runner. Install `claude-runner` (pipx install .), put "
+        "Can't find the runner. Install `agent-playbook` (pipx install .), put "
         "claude_runner.py next to playbook_mcp.py, or set CLAUDE_RUNNER."
     )
 
@@ -151,7 +152,7 @@ def core_handoff(path: str = ".") -> dict:
     return {"ok": True, "created": True, "path": str(target),
             "session_id": m.group(1) if m else None,
             "message": "Captured the current session. Quit this session, then "
-                       "start_playbook (or `claude-runner <path> --detach`). Don't run "
+                       "start_playbook (or `agent-playbook <path> --detach`). Don't run "
                        "it while this interactive session is still open — they'd share "
                        "one session."}
 

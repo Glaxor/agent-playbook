@@ -32,7 +32,7 @@ Or register + install persistently:
 ### Rescue a session about to hit the wall
 From inside the stuck session: **Esc** to interrupt → `/playbook handoff` (pins this
 session) → **quit** the session → `/playbook start` from a fresh session (or
-`claude-runner playbook.yaml --detach`). It resumes your conversation after the reset and
+`agent-playbook playbook.yaml --detach`). It resumes your conversation after the reset and
 pings you when done. Quitting first matters: two processes must not share one session.
 
 The runner uses your Claude Code OAuth login (Max subscription), not an API key.

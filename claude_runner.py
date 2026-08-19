@@ -17,11 +17,11 @@ LIMITS
     backoff.
 
 USAGE
-    claude-runner playbook.yaml                # run
-    claude-runner playbook.yaml --detach       # background, survives logout
-    claude-runner playbook.yaml --dry-run      # print the plan, run nothing
-    claude-runner playbook.yaml --restart      # ignore saved progress, start over
-    claude-runner playbook.yaml --from 3       # start at instruction #3 (1-based)
+    agent-playbook playbook.yaml                # run
+    agent-playbook playbook.yaml --detach       # background, survives logout
+    agent-playbook playbook.yaml --dry-run      # print the plan, run nothing
+    agent-playbook playbook.yaml --restart      # ignore saved progress, start over
+    agent-playbook playbook.yaml --from 3       # start at instruction #3 (1-based)
 
 NOTES
     * Does NOT use --bare and passes no API key, so the run uses your OAuth login and
@@ -191,7 +191,7 @@ class Notifier:
         self.backend = (backend or "none").lower()
         self.cfg = cfg
 
-    def notify(self, text: str, title: str = "claude-runner") -> bool:
+    def notify(self, text: str, title: str = "agent-playbook") -> bool:
         try:
             if self.backend == "telegram":
                 return self._telegram(f"{title}\n{text}".strip())
@@ -334,7 +334,7 @@ def resolve_session_id(value: str, cwd: str | None) -> str | None:
 # Starter playbook (generated when no playbook file is given)
 # --------------------------------------------------------------------------- #
 PLAYBOOK_TEMPLATE = """\
-# playbook.yaml — edit the prompt(s), then run:  claude --playbook playbook.yaml
+# playbook.yaml — edit the prompt(s), then run:  agent-playbook playbook.yaml
 #
 # The runner walks `instructions` top to bottom:
 #   prompt: ...   run as a Claude Code prompt
@@ -354,7 +354,7 @@ defaults:
   cwd: .                  # working dir for prompts, e.g. ~/projects/myapp
   permission_mode: dontAsk
   allowed_tools: [Read, Write, Edit, "Bash(npm:*)", "Bash(git add:*)", "Bash(git commit:*)"]
-  # agent: claude             # claude | codex | gemini  (see: claude-runner --agents)
+  # agent: claude             # claude | codex | gemini  (see: agent-playbook --agents)
   # fallback_agents: [codex]  # if the agent hits its usage limit, hand the prompt
   #                           # to these instead of only waiting for the reset
 
@@ -367,7 +367,7 @@ instructions:
 
 HANDOFF_TEMPLATE = """\
 # playbook.yaml — pinned to an existing Claude Code session.
-# Edit the prompt if you like, then:  claude-runner {name} --detach
+# Edit the prompt if you like, then:  agent-playbook {name} --detach
 # Tip: quit the interactive session first, so two processes don't share one session.
 
 session: keep
@@ -398,19 +398,19 @@ def handoff_scaffold(target: Path, cwd: str) -> int:
     target.write_text(HANDOFF_TEMPLATE.format(sid=sid, cwd=cwd, name=target.name), encoding="utf-8")
     print(f"Created {target}, pinned to session {sid}")
     print("Quit this session, then run:")
-    print(f"  claude-runner {target} --detach")
+    print(f"  agent-playbook {target} --detach")
     return 0
 
 
 def scaffold_playbook(target: Path) -> int:
     if target.exists():
         print(f"{target} already exists — not overwriting.")
-        print(f"Edit it, then run:  claude --playbook {target}")
+        print(f"Edit it, then run:  agent-playbook {target}")
         return 0
     target.write_text(PLAYBOOK_TEMPLATE, encoding="utf-8")
     print(f"Created {target}")
     print("Edit the `instructions` (and notify_backend if you want pings), then run:")
-    print(f"  claude --playbook {target}")
+    print(f"  agent-playbook {target}")
     return 0
 
 
@@ -644,7 +644,7 @@ def agent_chain(opts: dict) -> list[str]:
 # --------------------------------------------------------------------------- #
 def runner_home() -> Path:
     return Path(os.path.expanduser(os.environ.get("CLAUDE_RUNNER_HOME")
-                                   or "~/.claude-runner"))
+                                   or "~/.agent-playbook"))
 
 
 def record_window_event(agent: str, raw: str, cap_sec: int) -> None:
@@ -957,7 +957,7 @@ def main() -> int:
             if name not in ADAPTERS:
                 sys.exit(f"Instruction #{n}: unknown agent '{name}'. "
                          f"Available: {', '.join(sorted(ADAPTERS))} "
-                         f"(see: claude-runner --agents)")
+                         f"(see: agent-playbook --agents)")
 
     state_path = Path(args.state) if args.state else pb_path.with_suffix(".state.json")
     state = fresh_state() if args.restart else load_state(state_path)
@@ -1065,7 +1065,7 @@ def main() -> int:
                     err = (res.get("text") or "")[:300]
                     log(f"   FAILED prompt #{idx1} (exit={res.get('exit_code')}): {err}")
                     if notify_on_failure:
-                        notifier.notify(f"prompt #{idx1} failed:\n{err}", title="claude-runner FAILED")
+                        notifier.notify(f"prompt #{idx1} failed:\n{err}", title="agent-playbook FAILED")
                     save_state(state_path, state)
                     log("Stopping on failure.")
                     return 1
@@ -1089,7 +1089,7 @@ def main() -> int:
     if notify_on_finish:
         notifier.notify(
             f"playbook complete — {len(instructions)} instructions, "
-            f"${state['total_cost_usd']:.4f}", title="claude-runner done")
+            f"${state['total_cost_usd']:.4f}", title="agent-playbook done")
     return 0
 
 

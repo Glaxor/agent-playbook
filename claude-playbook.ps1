@@ -7,14 +7,14 @@
 #   notepad $PROFILE          # paste this in (create the file if it doesn't exist)
 #   . $PROFILE
 #
-# Requires `claude-runner` on PATH (pipx install .). If you didn't install it,
-# replace the claude-runner line with:
+# Requires `agent-playbook` on PATH (pipx install .). If you didn't install it,
+# replace the agent-playbook line with:
 #   python "$HOME\tools\claude_runner.py" @rest
 # ---------------------------------------------------------------------------
 function claude {
     if ($args.Count -ge 1 -and $args[0] -eq '--playbook') {
         $rest = @($args | Select-Object -Skip 1)
-        claude-runner @rest
+        agent-playbook @rest
     } else {
         # -CommandType Application skips this function itself, so no recursion.
         $real = (Get-Command claude -CommandType Application | Select-Object -First 1).Source

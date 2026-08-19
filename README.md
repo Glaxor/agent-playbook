@@ -1,4 +1,6 @@
-# claude_runner
+# agent-playbook
+
+One playbook, any agent: Claude Code, Codex CLI, Gemini CLI. *(formerly claude-playbook — the `claude-runner` command still works as a legacy alias)*
 
 Run an ordered **playbook** of AI coding-agent instructions. The runner walks the list
 top to bottom: a `prompt` is executed as an agent prompt (Claude Code by default; Codex
@@ -10,16 +12,16 @@ and then *continues the same prompt* (resuming the threaded session) the moment 
 window reopens — no manual restart. With `fallback_agents`, it doesn't even wait: the
 prompt is handed to your next subscription's agent, and only when *every* agent is
 limited does it wait for the first reset. Every limit event is recorded — see
-`claude-runner --windows`.
+`agent-playbook --windows`.
 
 ## Install (one-time)
 ```bash
-pipx install .            # gives you a global `claude-runner` command
+pipx install .            # gives you a global `agent-playbook` command
 ```
 No pipx? `pip install --user .`, or just `chmod +x claude_runner.py && ./claude_runner.py …`
 
 ### Optional: `claude --playbook` shim
-To launch via `claude --playbook <file>` instead of `claude-runner`, append the shell
+To launch via `claude --playbook <file>` instead of `agent-playbook`, append the shell
 function in `claude-playbook.sh` to your `~/.bashrc` (or `~/.zshrc`) and re-source it:
 ```bash
 cat claude-playbook.sh >> ~/.bashrc && source ~/.bashrc
@@ -34,11 +36,11 @@ passes straight through to the real binary. (`--playbook` must be the first argu
 claude login                              # be authenticated (uses your Max plan)
 
 claude --playbook                          # no file -> generate a starter playbook.yaml
-claude-runner playbook.yaml               # run
-claude-runner playbook.yaml --detach      # background, survives logout
-claude-runner playbook.yaml --dry-run     # print the plan, run nothing
-claude-runner playbook.yaml --restart     # ignore saved progress, start over
-claude-runner playbook.yaml --from 3      # start at instruction #3 (1-based)
+agent-playbook playbook.yaml               # run
+agent-playbook playbook.yaml --detach      # background, survives logout
+agent-playbook playbook.yaml --dry-run     # print the plan, run nothing
+agent-playbook playbook.yaml --restart     # ignore saved progress, start over
+agent-playbook playbook.yaml --from 3      # start at instruction #3 (1-based)
 ```
 `--detach` prints the pid + tail/stop commands and logs to `playbook.logs/runner.log`.
 Works on Linux, macOS, and Windows (on Windows the detached run survives closing the
@@ -102,7 +104,7 @@ Semantics worth knowing:
 - Only a **usage limit** triggers fallback. Hard failures stop the playbook as usual;
   transient rate limits are retried on the same agent with backoff.
 - When *every* agent in the chain is limited, the runner waits and retries the chain.
-- `claude-runner --agents` shows which agent CLIs are installed. Binaries can be
+- `agent-playbook --agents` shows which agent CLIs are installed. Binaries can be
   overridden with `CLAUDE_BIN`, `CODEX_BIN`, `GEMINI_BIN`.
 - The codex and gemini adapters are **experimental**: their contracts are covered by
   stub tests; verify once against your installed CLI versions.
@@ -110,9 +112,9 @@ Semantics worth knowing:
 ## Usage windows
 
 Every observed usage-limit event (any agent) is recorded to
-`~/.claude-runner/windows.json`. See when windows closed and when they reopen:
+`~/.agent-playbook/windows.json`. See when windows closed and when they reopen:
 ```bash
-claude-runner --windows      # per agent: hits in the last 7 days, last hit, next known reset
+agent-playbook --windows      # per agent: hits in the last 7 days, last hit, next known reset
 ```
 
 ## Notifications
@@ -167,7 +169,7 @@ pip install mcp pyyaml
 claude mcp add --scope user --transport stdio claude-playbook \
     -- python3 /ABSOLUTE/PATH/playbook_mcp.py
 ```
-The server finds the runner via `claude-runner` on PATH, a sibling `claude_runner.py`,
+The server finds the runner via `agent-playbook` on PATH, a sibling `claude_runner.py`,
 or the `CLAUDE_RUNNER` env var.
 
 Tools:
@@ -186,11 +188,11 @@ A long interactive prompt about to hit the wall? Hand the session to the runner 
 waits out the reset and finishes unattended.
 
 ```bash
-claude-runner --list-sessions            # find the session id (newest first)
+agent-playbook --list-sessions            # find the session id (newest first)
 ```
 Then point a one-prompt playbook at it (CLI flag overrides the playbook field):
 ```bash
-claude-runner continue.yaml --resume-session <id>    # or: --resume-session latest
+agent-playbook continue.yaml --resume-session <id>    # or: --resume-session latest
 ```
 ```yaml
 # continue.yaml
@@ -211,9 +213,9 @@ of copying ids around. From the stuck session:
 
 1. **Esc** to interrupt the running turn (the session is saved).
 2. `/playbook handoff`  → writes a `playbook.yaml` pinned to *this* session's id, with a
-   "continue where you left off" prompt. (CLI equivalent: `claude-runner --handoff`.)
+   "continue where you left off" prompt. (CLI equivalent: `agent-playbook --handoff`.)
 3. **Quit** the interactive session (so two processes don't share one session).
-4. `claude-runner playbook.yaml --detach`  — or `/playbook start` from a fresh session.
+4. `agent-playbook playbook.yaml --detach`  — or `/playbook start` from a fresh session.
 
 It waits out the reset, resumes your conversation with full context, finishes, and pings
 you. Works because the session you're in is the newest transcript for the project, so
