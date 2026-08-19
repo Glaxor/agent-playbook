@@ -3,7 +3,10 @@ name = "agent-playbook"
 version = "0.2.0"
 description = "Drive Claude Code, Codex, and Gemini CLIs headless from a YAML playbook — rides out usage limits, falls back across agents, notifies your phone."
 requires-python = ">=3.9"
-dependencies = ["pyyaml>=6"]
+dependencies = [
+    "pyyaml>=6",
+    "tzdata; platform_system == 'Windows'",   # zoneinfo has no system tz database on Windows
+]
 
 [project.scripts]
 agent-playbook = "claude_runner:main"

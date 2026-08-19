@@ -1,5 +1,7 @@
 # agent-playbook
 
+[![CI](https://github.com/Glaxor/agent-playbook/actions/workflows/ci.yml/badge.svg)](https://github.com/Glaxor/agent-playbook/actions/workflows/ci.yml)
+
 One playbook, any agent: Claude Code, Codex CLI, Gemini CLI. *(formerly claude-playbook — the `claude-runner` command still works as a legacy alias)*
 
 Run an ordered **playbook** of AI coding-agent instructions. The runner walks the list
