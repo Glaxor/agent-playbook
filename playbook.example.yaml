@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# Example playbook for claude_runner.py
+#   claude-runner playbook.example.yaml --dry-run
+#
+# The runner walks `instructions` top to bottom:
+#   - a `prompt:` is executed as a Claude Code prompt (waits + continues on limit)
+#   - a `notify:` sends a message via notify_backend
+#   - end of list -> stop
+# ---------------------------------------------------------------------------
+
+session: keep          # keep = thread ONE Claude session across all prompts; fresh = independent
+continue_on_limit: true   # hit the usage limit? wait for reset, then continue the prompt (don't terminate)
+notify_on_finish: true    # send a notification when the whole playbook finishes
+
+# Applied to every prompt unless the instruction overrides it.
+defaults:
+  cwd: ~/projects/verb-drill
+  permission_mode: dontAsk
+  allowed_tools: [Read, Write, Edit, "Bash(npm:*)", "Bash(git add:*)", "Bash(git commit:*)"]
+  max_turns: 50
+  model:                # null = account default
+
+# Notifications. backend: telegram | ntfy | none. Secrets live in env vars:
+#   Telegram: export TELEGRAM_BOT_TOKEN=...   export TELEGRAM_CHAT_ID=...
+#   ntfy:     export NTFY_TOPIC=my-claude-runs   (then subscribe in the ntfy app)
+notify_backend: telegram
+notify_on_failure: true     # also ping if a prompt hard-fails, then stop
+notify:
+  # ntfy_topic: my-claude-runs
+
+# Limit / wait tuning.
+limits:
+  poll_interval_sec: 300      # fallback wait if the reset time can't be parsed
+  resume_poll_sec: 30         # after the first wait, poll this often so it resumes ASAP
+  transient_base_sec: 15
+  transient_max_sec: 300
+  transient_max_retries: 6
+  usage_max_wait_sec: 86400
+
+instructions:
+  - prompt: >
+      Implement the spaced-repetition scheduler module described in CLAUDE.md,
+      with unit tests. Commit when the suite is green. Be idempotent: if it already
+      exists and tests pass, change nothing.
+    verify: "npm test"        # this prompt only counts as done if this exits 0
+
+  - prompt: "Now add streak tracking with localStorage persistence and weak-spot targeting."
+    verify: "npm test"
+
+  - notify: "verb.drill: scheduler + streaks done"
+
+  - prompt_file: ./prompts/tts.md        # long prompt kept in its own file
+    allowed_tools: [Read, Write, Edit]   # override defaults for this one
+
+  - notify: "verb.drill: all instructions complete - review the branch."

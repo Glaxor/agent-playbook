@@ -1,0 +1,16 @@
+[project]
+name = "claude-runner"
+version = "0.1.0"
+description = "Drive Claude Code, Codex, and Gemini CLIs headless from a YAML playbook — rides out usage limits, falls back across agents, notifies your phone."
+requires-python = ">=3.9"
+dependencies = ["pyyaml>=6"]
+
+[project.scripts]
+claude-runner = "claude_runner:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["claude_runner"]

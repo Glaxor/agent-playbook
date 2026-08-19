@@ -1,0 +1,18 @@
+# Secrets — never commit
+.env
+
+# Personal/local playbooks and run artifacts
+playbook.yaml
+*.state.json
+*.logs/
+test-run/
+notify-test*
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+hello.txt
