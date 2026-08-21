@@ -4,7 +4,7 @@
 
 One playbook, any agent: Claude Code, Codex CLI, Gemini CLI. *(formerly claude-playbook — the `claude-runner` command still works as a legacy alias)*
 
-![agent-playbook self-healing a failed verify: the test fails, the failure is fed back to the agent, the fixed run goes green](docs/demo.gif)
+![agent-playbook self-healing a failed verify: the test fails, the failure is fed back to the agent, the fixed run goes green](https://raw.githubusercontent.com/Glaxor/agent-playbook/main/docs/demo.gif)
 
 *Real, unedited run: the agent's first attempt fails the test suite, the failing
 output is fed back to the same session (`fix_attempts`), and the second attempt
@@ -24,9 +24,11 @@ limited does it wait for the first reset. Every limit event is recorded — see
 
 ## Install (one-time)
 ```bash
-pipx install .            # gives you a global `agent-playbook` command
+pipx install llm-agent-playbook   # gives you a global `agent-playbook` command
 ```
-No pipx? `pip install --user .`, or just `chmod +x claude_runner.py && ./claude_runner.py …`
+No pipx? `pip install --user llm-agent-playbook`. From a checkout: `pipx install .`,
+or just `chmod +x claude_runner.py && ./claude_runner.py …`
+*(The PyPI package is `llm-agent-playbook`; the command it installs is `agent-playbook`.)*
 
 ### Optional: `claude --playbook` shim
 To launch via `claude --playbook <file>` instead of `agent-playbook`, append the shell
