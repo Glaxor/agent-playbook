@@ -35,6 +35,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:
@@ -130,9 +131,16 @@ def core_scaffold(path: str = ".") -> dict:
                 "message": f"{target} already exists; edit it, don't overwrite."}
     cmd = runner_cmd()
     # Runner scaffolds when given no playbook; it writes ./playbook.yaml in its cwd.
-    subprocess.run(cmd, cwd=str(target.parent), capture_output=True, text=True)
+    # stdin=DEVNULL: the child must not inherit this server's stdin (the MCP stdio
+    # pipe) — a pending read on that shared handle deadlocks the child's Python
+    # startup on Windows (sys.stdin init seeks the handle, sync pipe I/O serializes).
+    subprocess.run(cmd, cwd=str(target.parent), capture_output=True, text=True,
+                   stdin=subprocess.DEVNULL)
     ok = target.exists()
-    return {"ok": ok, "created": ok, "path": str(target),
+    if not ok:
+        return {"ok": False, "created": False, "path": str(target),
+                "error": f"Runner did not create {target}."}
+    return {"ok": True, "created": True, "path": str(target),
             "message": f"Created {target}. Edit the instructions, then start_playbook."}
 
 
@@ -144,7 +152,8 @@ def core_handoff(path: str = ".") -> dict:
         return {"ok": True, "created": False, "path": str(target),
                 "message": f"{target} already exists; not overwriting."}
     res = subprocess.run([*runner_cmd(), str(target), "--handoff"],
-                         cwd=str(target.parent), capture_output=True, text=True)
+                         cwd=str(target.parent), capture_output=True, text=True,
+                         stdin=subprocess.DEVNULL)
     out = (res.stdout or "") + (res.stderr or "")
     if not target.exists():
         return {"ok": False, "error": out.strip() or "handoff failed"}
@@ -167,16 +176,33 @@ def core_start(path: str) -> dict:
     if existing and _alive(existing):
         return {"ok": False, "error": f"Already running (pid {existing}).",
                 "pid": existing, "logfile": str(logs / "runner.log")}
+    if existing:
+        # Stale pidfile from a dead run. The runner's single-runner lock ignores
+        # dead pids, but clear it so the poll below can't report the old pid.
+        try:
+            pidfile.unlink()
+        except OSError:
+            pass
 
     cmd = [*runner_cmd(), str(pb), "--detach"]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = subprocess.run(cmd, capture_output=True, text=True,
+                         stdin=subprocess.DEVNULL)
     out = (res.stdout or "") + (res.stderr or "")
     m = re.search(r"pid=(\d+)", out)
     if not m:
         return {"ok": False, "error": "Runner did not report a pid.", "output": out.strip()}
     pid = int(m.group(1))
-    logs.mkdir(exist_ok=True)
-    pidfile.write_text(str(pid), encoding="utf-8")
+    # The pidfile belongs to the runner: it writes its own pid into run.pid on
+    # startup. Writing the printed pid here would trip the runner's single-runner
+    # lock against itself — under a pipx/venv redirector the printed pid is a
+    # wrapper process, not the runner, and it stays alive while the runner runs.
+    # Poll briefly so we can report the runner's real pid when it lands.
+    for _ in range(20):
+        real = _read_pid(pidfile)
+        if real:
+            pid = real
+            break
+        time.sleep(0.15)
     return {"ok": True, "pid": pid, "playbook": str(pb),
             "logfile": str(logs / "runner.log"),
             "message": f"Started in background (pid {pid}). Use playbook_status to check."}
@@ -254,7 +280,7 @@ def core_stop(path: str) -> dict:
             # No SIGTERM delivery on Windows; kill the tree (runner + its claude
             # child). State is saved at instruction boundaries, so resume is safe.
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
         else:
             os.kill(pid, signal.SIGTERM)   # runner flushes state on SIGTERM
         return {"ok": True, "stopped": True, "pid": pid,
