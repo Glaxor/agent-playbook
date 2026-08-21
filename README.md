@@ -145,6 +145,23 @@ on the first pass gets fixed overnight instead of stopping the playbook:
    DONE prompt #3 [claude]
 ```
 
+**`protect:`** — a list of files/globs (relative to the instruction's `cwd`) the
+agent must not touch, e.g. the test suite it's supposed to satisfy rather than
+edit:
+
+```yaml
+instructions:
+  - prompt: "Make the tests in tests/ pass. Do not edit the tests themselves."
+    protect: ["tests/**", "package-lock.json"]
+    verify: "npm test"
+    fix_attempts: 2
+```
+
+Every matched file is hashed before the agent runs; if any is changed, deleted,
+or a new file appears that matches the glob, the attempt fails exactly like a
+failed `verify:` — the agent is told which files it must restore, and gets
+`fix_attempts` chances to do so before `on_fail` applies.
+
 ## Control flow (`on_fail`, `label`, `when`)
 
 By default a hard-failed prompt stops the playbook. For unattended runs you can

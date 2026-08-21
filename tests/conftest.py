@@ -4,6 +4,8 @@ Each stub replaces a real CLI via its *_BIN env var. Every invocation pops the
 next step from its plan file (a JSON list), emits a response in that vendor's
 real output format, and appends {argv, prompt} to its calls file.
 Step kinds: success | usage | transient | error.
+A step may also carry write_files ({relpath: content}) and/or delete_files
+([relpath, ...]) to simulate the agent editing files in its cwd.
 """
 from __future__ import annotations
 
@@ -40,6 +42,18 @@ calls_path = os.environ.get(FLAVOR.upper() + "_STUB_CALLS")
 if calls_path:
     with open(calls_path, "a") as f:
         f.write(json.dumps({{"argv": sys.argv[1:], "prompt": prompt}}) + "\\n")
+
+# Simulate file edits an agent would make, relative to its cwd - used to
+# exercise the protect/tamper guard without a real coding agent.
+for rel, content in (step.get("write_files") or {{}}).items():
+    path = os.path.join(os.getcwd(), rel)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+for rel in step.get("delete_files") or []:
+    path = os.path.join(os.getcwd(), rel)
+    if os.path.exists(path):
+        os.remove(path)
 
 kind = step.get("kind", "success")
 

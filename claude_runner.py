@@ -37,6 +37,8 @@ from __future__ import annotations
 import argparse
 import atexit
 import datetime as dt
+import glob
+import hashlib
 import json
 import os
 import re
@@ -773,6 +775,44 @@ def run_verify(verify_cmd: str, cwd: str | None) -> tuple[bool, str]:
     return p.returncode == 0, tail
 
 
+def _protect_glob(pattern: str, cwd: str | None) -> list[str]:
+    """Expand one protect glob/path relative to cwd (absolute patterns pass through)."""
+    base = os.path.expanduser(cwd) if cwd else "."
+    full = pattern if os.path.isabs(pattern) else os.path.join(base, pattern)
+    return glob.glob(full, recursive=True)
+
+
+def hash_protected_files(protect: list, cwd: str | None) -> dict[str, str]:
+    """sha256 of every file currently matching `protect`'s globs, keyed by
+    absolute path. Snapshot taken right before and right after an agent call."""
+    hashes: dict[str, str] = {}
+    for pattern in protect or []:
+        for path in _protect_glob(str(pattern), cwd):
+            if os.path.isfile(path):
+                try:
+                    hashes[os.path.abspath(path)] = hashlib.sha256(
+                        Path(path).read_bytes()).hexdigest()
+                except OSError:
+                    pass
+    return hashes
+
+
+def tampered_protected_files(before: dict, protect: list, cwd: str | None) -> list[str]:
+    """Diff a before-snapshot against the current state. Returns the (relative,
+    sorted) paths of any protected file that changed, was deleted, or is new."""
+    after = hash_protected_files(protect, cwd)
+    changed_or_deleted = {p for p, h in before.items() if after.get(p) != h}
+    created = set(after) - set(before)
+    base = os.path.abspath(os.path.expanduser(cwd) if cwd else ".")
+    rels = set()
+    for p in changed_or_deleted | created:
+        try:
+            rels.add(os.path.relpath(p, base))
+        except ValueError:
+            rels.add(p)
+    return sorted(rels)
+
+
 def sleep_with_heartbeat(seconds: int, why: str) -> None:
     end = time.time() + seconds
     next_beat = 0.0
@@ -798,6 +838,13 @@ def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
                budget_usd: float | None = None) -> dict:
     cwd = os.path.expanduser(opts["cwd"]) if opts.get("cwd") else None
     chain = agent_chain(opts)
+    # Snapshot once, before this instruction's first agent call. Every later
+    # attempt (including fix rounds) is compared back to this SAME baseline,
+    # so a fix round that actually restores a file is recognized as clean —
+    # comparing attempt-to-attempt instead would flag a legitimate restore as
+    # a fresh tamper (it differs from the just-tampered prior snapshot).
+    protect_baseline = (hash_protected_files(opts["protect"], cwd)
+                         if opts.get("protect") else None)
 
     poll = int(limits.get("poll_interval_sec", 300))
     resume_poll = int(limits.get("resume_poll_sec", 30))
@@ -876,6 +923,29 @@ def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
                     log(f"   [{name}] usage limit — switching to next agent")
                 continue                      # try the next agent in the chain
 
+            if res["ok"] and opts.get("protect"):
+                tampered = tampered_protected_files(protect_baseline or {}, opts["protect"], cwd)
+                if tampered:
+                    names = ", ".join(tampered)
+                    log(f"   protected files tampered: {names}")
+                    if fixes < fix_attempts:
+                        fixes += 1
+                        log(f"   protected files tampered — asking [{name}] to fix it "
+                            f"(fix {fixes}/{fix_attempts})")
+                        prompt = (
+                            "You modified one or more protected files that must not "
+                            "be changed:\n"
+                            f"    {names}\n"
+                            "Restore these files to their original, untouched state "
+                            "and then solve the task without modifying them."
+                        )
+                        chain = [name]
+                        break             # restart the outer loop with the fix prompt
+                    res["ok"] = False
+                    res["text"] = ("protected files were modified: " + names
+                                    + "\n" + res["text"])
+                    return done(res)
+
             if res["ok"] and opts.get("verify"):
                 v_ok, v_tail = run_verify(opts["verify"], cwd)
                 if not v_ok:
@@ -943,7 +1013,7 @@ def instr_kind(instr: dict) -> str:
 # keys, never to reject them, so future fields stay forward-compatible.
 _OPTS_KEYS = {"cwd", "allowed_tools", "permission_mode", "max_turns", "model",
               "models", "verify", "agent", "fallback_agents", "codex_sandbox",
-              "timeout_min", "fix_attempts", "max_attempts"}
+              "timeout_min", "fix_attempts", "max_attempts", "protect"}
 _TOP_KEYS = {"session", "continue_on_limit", "notify_on_finish",
              "notify_on_failure", "notify_backend", "notify", "defaults",
              "limits", "instructions", "max_cost_usd", "resume_session"}
@@ -1043,7 +1113,7 @@ def merged_opts(instr: dict, defaults: dict) -> dict:
     opts = dict(defaults)
     for k in ("cwd", "allowed_tools", "permission_mode", "max_turns", "model",
               "models", "verify", "agent", "fallback_agents", "codex_sandbox",
-              "timeout_min", "fix_attempts", "max_attempts"):
+              "timeout_min", "fix_attempts", "max_attempts", "protect"):
         if k in instr:
             opts[k] = instr[k]
     opts.setdefault("permission_mode", "dontAsk")
