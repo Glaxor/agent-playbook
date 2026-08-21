@@ -4,6 +4,12 @@
 
 One playbook, any agent: Claude Code, Codex CLI, Gemini CLI. *(formerly claude-playbook — the `claude-runner` command still works as a legacy alias)*
 
+![agent-playbook self-healing a failed verify: the test fails, the failure is fed back to the agent, the fixed run goes green](docs/demo.gif)
+
+*Real, unedited run: the agent's first attempt fails the test suite, the failing
+output is fed back to the same session (`fix_attempts`), and the second attempt
+goes green — unattended, for $0.04.*
+
 Run an ordered **playbook** of AI coding-agent instructions. The runner walks the list
 top to bottom: a `prompt` is executed as an agent prompt (Claude Code by default; Codex
 CLI and Gemini CLI are also supported); a `notify` sends a message; end of list → it
