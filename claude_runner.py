@@ -782,9 +782,13 @@ def _protect_glob(pattern: str, cwd: str | None) -> list[str]:
     return glob.glob(full, recursive=True)
 
 
-def hash_protected_files(protect: list, cwd: str | None) -> dict[str, str]:
+def hash_protected_files(protect: list | str, cwd: str | None) -> dict[str, str]:
     """sha256 of every file currently matching `protect`'s globs, keyed by
-    absolute path. Snapshot taken right before and right after an agent call."""
+    absolute path. Snapshot taken right before and right after an agent call.
+    A bare string (protect: tests/x.py) counts as a one-item list — iterating
+    its characters would silently protect nothing."""
+    if isinstance(protect, str):
+        protect = [protect]
     hashes: dict[str, str] = {}
     for pattern in protect or []:
         for path in _protect_glob(str(pattern), cwd):

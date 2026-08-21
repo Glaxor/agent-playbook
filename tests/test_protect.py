@@ -29,6 +29,18 @@ def test_protect_modified_file_fails_like_verify(stub, tmp_path):
     assert read_state(pb).get("next_index", 0) == 0
 
 
+def test_protect_bare_string_still_guards(stub, tmp_path):
+    """protect: given as a YAML scalar (not a list) must guard, not silently
+    iterate the string's characters and protect nothing."""
+    (tmp_path / "secret.txt").write_text("original", encoding="utf-8")
+    pb = write_playbook(tmp_path / "pb.yaml",
+                        [{"prompt": "job", "protect": "secret.txt"}])
+    stub.set_plan([{"kind": "success", "write_files": {"secret.txt": "tampered"}}])
+    r = run_runner([str(pb)], tmp_path, stub.env())
+    assert r.returncode == 1
+    assert "protected files tampered: secret.txt" in r.stdout
+
+
 def test_protect_deleted_file_fails(stub, tmp_path):
     (tmp_path / "secret.txt").write_text("original", encoding="utf-8")
     pb = write_playbook(tmp_path / "pb.yaml",
