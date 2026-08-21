@@ -25,6 +25,8 @@ limited does it wait for the first reset. Every limit event is recorded — see
 ## Install (one-time)
 ```bash
 pipx install llm-agent-playbook   # gives you a global `agent-playbook` command
+agent-playbook init                # scaffold a small, runnable starter playbook.yaml
+agent-playbook playbook.yaml       # run it — succeeds as-is, in under two minutes
 ```
 No pipx? `pip install --user llm-agent-playbook`. From a checkout: `pipx install .`,
 or just `chmod +x claude_runner.py && ./claude_runner.py …`
@@ -285,6 +287,15 @@ TELEGRAM_CHAT_ID=123456789
   quotes, and non-ASCII text survive on every OS.
 - **`CLAUDE_BIN`** env var overrides which `claude` binary the runner invokes (useful
   for testing or non-standard installs).
+
+## Examples
+- [`examples/dependency-upgrade`](examples/dependency-upgrade) — audits a Python
+  project's outdated packages, upgrades them in batches from least- to most-risky
+  with the test suite as a self-healing `verify:` gate, and rolls back with a
+  written note if a batch can't be fixed.
+- [`examples/failover-demo`](examples/failover-demo) — a fake, always-limited Codex
+  binary so you can watch `fallback_agents` hand a prompt to Claude within a second,
+  without needing an actually exhausted subscription.
 
 ## Tests
 ```bash
