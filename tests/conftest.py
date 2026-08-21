@@ -40,6 +40,11 @@ if calls_path:
 
 kind = step.get("kind", "success")
 
+if kind == "hang":                    # simulate a stuck agent call (any flavor)
+    import time as _time
+    _time.sleep(float(step.get("sleep", 30)))
+    kind = "success"                  # if not killed by the timeout, succeed
+
 if FLAVOR == "claude":
     if kind == "success":
         print(json.dumps({{"type": "result", "subtype": "success", "is_error": False,
@@ -186,14 +191,16 @@ def run_runner(args: list[str], cwd: Path, env: dict,
                timeout: int = 120) -> subprocess.CompletedProcess:
     return subprocess.run([sys.executable, str(RUNNER), *args],
                           cwd=str(cwd), env=env, capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, encoding="utf-8", errors="replace",
+                          timeout=timeout)
 
 
 def start_runner(args: list[str], cwd: Path, env: dict) -> subprocess.Popen:
     return subprocess.Popen([sys.executable, str(RUNNER), *args],
                             cwd=str(cwd), env=env,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            stdin=subprocess.DEVNULL, text=True)
+                            stdin=subprocess.DEVNULL, text=True,
+                            encoding="utf-8", errors="replace")
 
 
 def wait_for(cond, timeout: float = 30, interval: float = 0.25) -> bool:

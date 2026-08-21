@@ -1,7 +1,7 @@
 [project]
 name = "agent-playbook"
-version = "0.2.0"
-description = "Drive Claude Code, Codex, and Gemini CLIs headless from a YAML playbook — rides out usage limits, falls back across agents, notifies your phone."
+version = "0.3.0"
+description = "Drive Claude Code, Codex, and Gemini CLIs headless from a YAML playbook - rides out usage limits, falls back across agents, notifies your phone."
 requires-python = ">=3.9"
 dependencies = [
     "pyyaml>=6",

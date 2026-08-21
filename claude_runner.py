@@ -350,10 +350,15 @@ notify_backend: none      # none | telegram | ntfy  (set this to actually receiv
 # Telegram: export TELEGRAM_BOT_TOKEN=...  export TELEGRAM_CHAT_ID=...
 # ntfy:     export NTFY_TOPIC=...   (then subscribe to that topic in the ntfy app)
 
+# max_cost_usd: 10        # hard budget cap for the whole playbook (0/absent = none)
+
 defaults:
   cwd: .                  # working dir for prompts, e.g. ~/projects/myapp
   permission_mode: dontAsk
   allowed_tools: [Read, Write, Edit, "Bash(npm:*)", "Bash(git add:*)", "Bash(git commit:*)"]
+  timeout_min: 180        # kill + retry an agent call that produces nothing for this long
+  # fix_attempts: 2           # verify failed? feed the output back to the agent to fix
+  # max_attempts: 25          # runaway guard: max attempts per prompt (0 = unlimited)
   # agent: claude             # claude | codex | gemini  (see: agent-playbook --agents)
   # fallback_agents: [codex]  # if the agent hits its usage limit, hand the prompt
   #                           # to these instead of only waiting for the reset
@@ -456,21 +461,59 @@ class BaseAdapter:
     def parse(self, stdout: str, stderr: str) -> dict:
         raise NotImplementedError
 
+    @staticmethod
+    def _kill_tree(proc: subprocess.Popen) -> None:
+        """Kill the agent call INCLUDING its children. proc.kill() alone only
+        hits the direct child — a .cmd/.bat shim's real process (node, python)
+        would survive and keep the pipes open forever."""
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                               capture_output=True)
+            else:
+                os.killpg(proc.pid, signal.SIGKILL)   # start_new_session set below
+        except Exception:
+            pass
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
     def run(self, prompt: str, opts: dict, session_id: str | None, cwd: str | None) -> dict:
         cmd = self.build(opts, session_id if self.supports_resume else None)
+        # A hung agent call must never block an unattended run forever.
+        timeout_min = float(opts.get("timeout_min", 180) or 0)
+        timeout_sec = timeout_min * 60 if timeout_min > 0 else None
+        kwargs: dict = {}
+        if os.name != "nt":
+            kwargs["start_new_session"] = True   # own process group -> killable as a tree
         try:
             # Prompt travels via stdin (no ~32k Windows argv limit, no shell-shim
             # quoting). utf-8 explicitly: Windows text pipes default to the
             # legacy codepage, which mangles non-ASCII text.
-            proc = subprocess.run(cmd, cwd=cwd, input=prompt, capture_output=True,
-                                  text=True, encoding="utf-8", errors="replace")
+            proc = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, encoding="utf-8", errors="replace",
+                                    **kwargs)
         except FileNotFoundError:
             return {"ok": False, "limit": Limit.NONE, "agent": self.name,
                     "text": f"{self.name}: binary not found ({cmd[0]}). "
                             f"Install it or set {self.bin_env}.",
                     "session_id": None, "cost": 0.0, "num_turns": None,
                     "exit_code": 127, "raw": f"{self.name}: binary not found ({cmd[0]})"}
-        stdout, stderr = proc.stdout or "", proc.stderr or ""
+        try:
+            stdout, stderr = proc.communicate(prompt, timeout=timeout_sec)
+        except subprocess.TimeoutExpired:
+            self._kill_tree(proc)
+            try:
+                proc.communicate(timeout=15)     # reap; pipes close once the tree is dead
+            except Exception:
+                pass
+            msg = f"{self.name}: no result after {timeout_min:g} min (timeout_min) — killed."
+            return {"ok": False, "limit": Limit.NONE, "agent": self.name,
+                    "timed_out": True, "text": msg, "session_id": None,
+                    "cost": 0.0, "num_turns": None, "exit_code": -1, "raw": msg}
+        stdout, stderr = stdout or "", stderr or ""
         parsed = self.parse(stdout, stderr)
         combined = "\n".join([parsed.get("text") or "", stdout, stderr])
         failed = (proc.returncode != 0) or bool(parsed.get("is_error"))
@@ -717,14 +760,17 @@ def show_agents() -> int:
     return 0
 
 
-def run_verify(verify_cmd: str, cwd: str | None) -> bool:
+def run_verify(verify_cmd: str, cwd: str | None) -> tuple[bool, str]:
+    """Run the verify command. Returns (passed, output tail) — the tail is fed
+    back to the agent when fix_attempts is enabled."""
     log(f"   verify: {verify_cmd}")
     p = subprocess.run(verify_cmd, cwd=cwd, shell=True, capture_output=True,
                        text=True, encoding="utf-8", errors="replace")
+    tail_lines = (p.stdout + p.stderr).strip().splitlines()
+    tail = "\n".join(tail_lines[-40:])
     if p.returncode != 0:
-        tail = (p.stdout + p.stderr).strip().splitlines()[-4:]
-        log("   verify FAILED:\n     " + "\n     ".join(tail))
-    return p.returncode == 0
+        log("   verify FAILED:\n     " + "\n     ".join(tail_lines[-4:]))
+    return p.returncode == 0, tail
 
 
 def sleep_with_heartbeat(seconds: int, why: str) -> None:
@@ -748,7 +794,8 @@ def sleep_with_heartbeat(seconds: int, why: str) -> None:
 # `sessions` maps agent name -> its threaded session id, and is mutated.
 # --------------------------------------------------------------------------- #
 def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
-               logs_dir: Path, idx: int, continue_on_limit: bool = True) -> dict:
+               logs_dir: Path, idx: int, continue_on_limit: bool = True,
+               budget_usd: float | None = None) -> dict:
     cwd = os.path.expanduser(opts["cwd"]) if opts.get("cwd") else None
     chain = agent_chain(opts)
 
@@ -758,16 +805,38 @@ def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
     t_max = int(limits.get("transient_max_sec", 300))
     t_retries = int(limits.get("transient_max_retries", 6))
     usage_cap = int(limits.get("usage_max_wait_sec", 86400))
+    timeout_retries = int(limits.get("timeout_max_retries", 1))
+    max_attempts = int(opts.get("max_attempts", 0) or 0)
+    fix_attempts = int(opts.get("fix_attempts", 0) or 0)
 
-    attempt = usage_waits = 0
+    attempt = usage_waits = fixes = 0
+    spent = 0.0                              # cost accrued across ALL attempts
     transient_tries = {name: 0 for name in chain}
+    timeout_tries = {name: 0 for name in chain}
+
+    def done(res: dict) -> dict:
+        res["cost"] = round(spent, 4)
+        return res
+
     while True:
         primary_limit_raw = ""
         res = None
         for name in chain:
             adapter = ADAPTERS[name]
-            while True:                       # transient backoff for this agent
+            while True:                       # transient/timeout retries for this agent
                 check_stop()
+                if max_attempts and attempt >= max_attempts:
+                    return done({"ok": False, "limit": Limit.NONE, "agent": name,
+                                 "text": f"max_attempts ({max_attempts}) reached for "
+                                         f"prompt #{idx}; stopping this playbook.",
+                                 "session_id": sessions.get(name), "cost": 0.0,
+                                 "num_turns": None, "exit_code": None, "raw": ""})
+                if budget_usd is not None and spent >= budget_usd:
+                    return done({"ok": False, "limit": Limit.NONE, "agent": name,
+                                 "text": f"max_cost_usd budget exhausted "
+                                         f"(${spent:.4f} spent on prompt #{idx}); stopping.",
+                                 "session_id": sessions.get(name), "cost": 0.0,
+                                 "num_turns": None, "exit_code": None, "raw": ""})
                 attempt += 1
                 sid = sessions.get(name)
                 tag = (f"[{name}] " if len(chain) > 1 or name != "claude" else "") + \
@@ -776,14 +845,22 @@ def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
                 res = adapter.run(prompt, opts, sid, cwd)
                 (logs_dir / f"prompt{idx:02d}.attempt{attempt}.log").write_text(
                     res["raw"], encoding="utf-8")
+                spent += float(res.get("cost") or 0.0)
                 if res.get("session_id"):
                     sessions[name] = res["session_id"]
+                if res.get("timed_out"):
+                    timeout_tries[name] += 1
+                    if timeout_tries[name] > timeout_retries:
+                        return done(res)      # persistent hang -> fail the prompt
+                    log(f"   [{name}] timed out — retrying "
+                        f"({timeout_tries[name]}/{timeout_retries})")
+                    continue
                 if res["limit"] == Limit.TRANSIENT:
                     transient_tries[name] += 1
                     if transient_tries[name] > t_retries:
                         res["ok"] = False
                         res["text"] = "Exceeded transient rate-limit retries.\n" + res["text"]
-                        return res
+                        return done(res)
                     back = min(t_max, t_base * (2 ** (transient_tries[name] - 1)))
                     log(f"   transient limit; backoff {back}s "
                         f"({transient_tries[name]}/{t_retries})")
@@ -800,25 +877,45 @@ def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
                 continue                      # try the next agent in the chain
 
             if res["ok"] and opts.get("verify"):
-                if not run_verify(opts["verify"], cwd):
+                v_ok, v_tail = run_verify(opts["verify"], cwd)
+                if not v_ok:
+                    if fixes < fix_attempts:
+                        # Self-healing: feed the failure back to the SAME agent
+                        # (its session has the context) and let it fix the problem.
+                        fixes += 1
+                        log(f"   verify failed — asking [{name}] to fix it "
+                            f"(fix {fixes}/{fix_attempts})")
+                        prompt = (
+                            "The work is not done yet. The verification command\n"
+                            f"    {opts['verify']}\n"
+                            "failed with this output:\n"
+                            f"```\n{v_tail}\n```\n"
+                            "Diagnose and fix the problem so the command passes. "
+                            "Do not break existing functionality. Do not weaken or "
+                            "delete the verification itself."
+                        )
+                        chain = [name]
+                        break                 # restart the outer loop with the fix prompt
                     res["ok"] = False
                     res["text"] = "verify command failed.\n" + res["text"]
-            return res                        # success or hard failure
-
-        # every agent in the chain is usage-limited
-        if not continue_on_limit:
-            res["ok"] = False
-            res["text"] = ("Usage limit hit and continue_on_limit is disabled.\n"
-                           + res["text"])
-            return res
-        usage_waits += 1
-        # First wait: until the announced reset. Afterwards: short polls so we
-        # resume the instant a window actually reopens.
-        wait = (parse_reset_seconds(primary_limit_raw, usage_cap) or poll) \
-            if usage_waits == 1 else resume_poll
-        who = chain[0] if len(chain) == 1 else f"all agents: {', '.join(chain)}"
-        log(f"   USAGE LIMIT ({who}). Waiting ~{wait // 60}m then continuing this prompt.")
-        sleep_with_heartbeat(wait, "usage window")
+            return done(res)                  # success or hard failure
+        else:
+            # for-loop finished without break: every agent is usage-limited
+            if not continue_on_limit:
+                res["ok"] = False
+                res["text"] = ("Usage limit hit and continue_on_limit is disabled.\n"
+                               + res["text"])
+                return done(res)
+            usage_waits += 1
+            # First wait: until the announced reset. Afterwards: short polls so
+            # we resume the instant a window actually reopens.
+            wait = (parse_reset_seconds(primary_limit_raw, usage_cap) or poll) \
+                if usage_waits == 1 else resume_poll
+            who = chain[0] if len(chain) == 1 else f"all agents: {', '.join(chain)}"
+            log(f"   USAGE LIMIT ({who}). Waiting ~{wait // 60}m then continuing this prompt.")
+            sleep_with_heartbeat(wait, "usage window")
+            continue
+        continue                              # reached only via the fix-attempt break
 
 
 # --------------------------------------------------------------------------- #
@@ -845,7 +942,8 @@ def instr_kind(instr: dict) -> str:
 def merged_opts(instr: dict, defaults: dict) -> dict:
     opts = dict(defaults)
     for k in ("cwd", "allowed_tools", "permission_mode", "max_turns", "model",
-              "models", "verify", "agent", "fallback_agents", "codex_sandbox"):
+              "models", "verify", "agent", "fallback_agents", "codex_sandbox",
+              "timeout_min", "fix_attempts", "max_attempts"):
         if k in instr:
             opts[k] = instr[k]
     opts.setdefault("permission_mode", "dontAsk")
@@ -942,6 +1040,7 @@ def main() -> int:
     limits = pb.get("limits", {})
     session_mode = (pb.get("session", "keep")).lower()   # keep | fresh
     continue_on_limit = bool(pb.get("continue_on_limit", True))
+    max_cost_usd = float(pb.get("max_cost_usd", 0) or 0)   # 0 = no budget cap
     notify_on_failure = pb.get("notify_on_failure", True)
     notify_on_finish = bool(pb.get("notify_on_finish", False))
     notifier = Notifier(pb.get("notify_backend", "none"), pb.get("notify", {}))
@@ -1049,11 +1148,23 @@ def main() -> int:
                 notifier.notify(text)
 
             elif kind == "prompt":
+                spent_total = float(state.get("total_cost_usd", 0.0))
+                if max_cost_usd and spent_total >= max_cost_usd:
+                    msg = (f"max_cost_usd budget reached (${spent_total:.4f} of "
+                           f"${max_cost_usd:.2f}) — stopping before prompt #{idx1}. "
+                           f"Raise the budget and re-run to resume.")
+                    log(f"   BUDGET STOP: {msg}")
+                    if notify_on_failure:
+                        notifier.notify(msg, title="agent-playbook BUDGET")
+                    save_state(state_path, state)
+                    return 1
                 log(f"== #{idx1} prompt")
                 opts = merged_opts(instr, defaults)
                 sessions = state["sessions"] if session_mode == "keep" else {}
                 res = run_prompt(resolve_prompt_text(instr), opts, limits, sessions,
-                                 logs_dir, idx1, continue_on_limit=continue_on_limit)
+                                 logs_dir, idx1, continue_on_limit=continue_on_limit,
+                                 budget_usd=(max_cost_usd - spent_total)
+                                 if max_cost_usd else None)
 
                 state["total_cost_usd"] = round(
                     state.get("total_cost_usd", 0.0) + (res.get("cost") or 0.0), 4)

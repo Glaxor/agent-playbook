@@ -78,6 +78,35 @@ instructions:              # ordered; prompt or notify
 Each prompt is a full Claude Code prompt (same as typing into `claude`), with the tools
 you allow. `prompt_file: ./x.md` keeps long prompts in their own file.
 
+## Safety nets & self-healing
+
+Unattended runs need guardrails. All of these are optional:
+
+```yaml
+max_cost_usd: 10             # top level: hard budget for the whole playbook —
+                             # exceeded -> stop + notify; raise it and re-run to resume
+defaults:                    # (each also settable per instruction)
+  timeout_min: 180           # agent call producing nothing for this long is killed
+                             # (whole process tree) and retried once, then fails
+  max_attempts: 25           # runaway guard: max attempts per prompt (0 = unlimited)
+  fix_attempts: 2            # self-healing verify — see below
+```
+
+**Self-healing verify** turns `verify:` from a gate into a repair loop: when the
+verify command fails, its output is fed back to the same agent session —
+*"the verification command failed with this output: … fix it"* — up to
+`fix_attempts` times before the prompt counts as failed. A test suite that fails
+on the first pass gets fixed overnight instead of stopping the playbook:
+
+```
+   verify: python -m pytest -q
+   verify FAILED: ... 2 failed, 93 passed
+   verify failed — asking [claude] to fix it (fix 1/2)
+   running prompt #3 (resume 49c6a83a) attempt 2
+   verify: python -m pytest -q
+   DONE prompt #3 [claude]
+```
+
 ## Multiple agents (Claude, Codex, Gemini)
 
 The runner can drive more than one CLI coding agent — useful when you hold several
