@@ -53,6 +53,30 @@ on any OS, create a `stop.request` file in the run's `.logs` dir. The runner not
 within a few seconds (even while waiting out a usage-limit window), saves state, and
 exits; the next start resumes where it left off.
 
+## Run with Docker
+No local Python or Node needed — the image bundles the runner and the Claude Code CLI:
+```bash
+docker build -t agent-playbook .
+
+# reuse your host `claude` login, run the playbook in the current directory
+docker run --rm -it \
+  -v ~/.claude:/root/.claude \
+  -v ~/.claude.json:/root/.claude.json \
+  -v "$PWD":/work \
+  agent-playbook playbook.yaml
+```
+State and logs land next to the playbook on the host, so stopping the container and
+re-running resumes as usual. Worth knowing:
+- Authenticate once on the **host** with `claude login`; the two `~/.claude*` mounts
+  reuse that login. There is no login flow inside the container.
+- For background runs use Docker itself instead of `--detach`:
+  `docker run -d --name pb … agent-playbook playbook.yaml`, then `docker logs -f pb`
+  (a `--detach` child would die with the container's main process).
+- Pass notification secrets with `--env-file .env` — they are never baked into the
+  image (the build context is whitelisted to just the runner sources).
+- Only the default `claude` agent ships in the image; add Codex/Gemini CLIs in a
+  derived image if you use `fallback_agents`.
+
 ## Playbook format
 ```yaml
 session: keep              # keep = one threaded Claude session across prompts; fresh = independent

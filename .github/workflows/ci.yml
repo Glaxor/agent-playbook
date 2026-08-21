@@ -23,3 +23,17 @@ jobs:
         run: python -m pip install . pytest
       - name: Run tests (stub agents — no real AI usage)
         run: python -m pytest tests -v
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t agent-playbook .
+      - name: Smoke test — runner CLI and bundled Claude Code respond
+        run: |
+          docker run --rm agent-playbook --help
+          docker run --rm --entrypoint claude agent-playbook --version
+      - name: Dry-run the example playbook (executes nothing)
+        run: docker run --rm -v "$PWD":/work agent-playbook playbook.example.yaml --dry-run

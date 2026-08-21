@@ -1,0 +1,5 @@
+# Whitelist: only what the image build needs may enter the context.
+# Keeps .env, logs, state, transcripts, and other local files out of the image.
+*
+!pyproject.toml
+!claude_runner.py
