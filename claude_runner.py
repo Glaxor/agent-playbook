@@ -23,11 +23,16 @@ USAGE
     agent-playbook playbook.yaml --dry-run      # print the plan, run nothing
     agent-playbook playbook.yaml --restart      # ignore saved progress, start over
     agent-playbook playbook.yaml --from 3       # start at instruction #3 (1-based)
+    agent-playbook playbook.yaml --watch        # read-only: attach and stream its run
 
 NOTES
     * Does NOT use --bare and passes no API key, so the run uses your OAuth login and
       bills against your Max subscription rather than per-token API billing.
     * Secrets come from env vars, never the playbook.
+    * --watch only reads state/pid/log files, never writes them. Because an agent's
+      own output is written only once its attempt finishes, --watch streams the
+      RUNNER's log (phase changes, DONE/FAILED lines, waits) — not an agent's live
+      keystrokes as it works.
 
 REQUIRES
     pip install pyyaml
@@ -1226,6 +1231,116 @@ def merged_opts(instr: dict, defaults: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# --watch: read-only attach to a run's progress + log stream.
+#
+# LIMITATION: an agent's own output is written to
+# <playbook>.logs/promptNN.attemptM.log only once that attempt finishes, so
+# --watch streams the RUNNER's log (phase changes, DONE/FAILED lines, waits) —
+# not an agent's live keystrokes as it works.
+# --------------------------------------------------------------------------- #
+def _read_pid_file(pid_file: Path) -> int | None:
+    if not pid_file.exists():
+        return None
+    try:
+        return int(pid_file.read_text(encoding="utf-8").strip())
+    except Exception:
+        return None
+
+
+def _watch_status(pb_path: Path, total: int, state_path: Path,
+                   pid_file: Path) -> tuple[str, bool]:
+    """One status line: phase (not started/running/stopped/complete), derived
+    purely from run.pid liveness + saved state (same model as playbook_mcp's
+    core_status), plus done/total instructions and cost so far.
+    Returns (line, alive)."""
+    state = load_state(state_path)
+    next_index = int(state.get("next_index", 0) or 0)
+    alive = pid_alive(_read_pid_file(pid_file))
+    if total > 0 and next_index >= total:
+        phase = "complete"
+    elif alive:
+        phase = "running"
+    elif next_index > 0:
+        phase = "stopped"
+    else:
+        phase = "not started"
+    cost = float(state.get("total_cost_usd", 0.0) or 0.0)
+    line = (f"{pb_path}: {phase} — {min(next_index, total)}/{total} "
+            f"instructions done, ${cost:.4f} spent so far")
+    return line, alive
+
+
+def watch_playbook(pb_path: Path) -> int:
+    """Attach read-only to a playbook's run: print a one-line status header,
+    then follow <playbook>.logs/runner.log like `tail -f` (starting from its
+    last 10 lines for context), polling the file by position ~every 0.5s —
+    pure Python, no external tools. Exits on its own, with a final status
+    line, once the run is no longer alive (pid dead or absent); if no run is
+    active when watching starts, it prints the status and exits immediately.
+    NEVER writes to state, pid, or log files — this only reads them."""
+    if not pb_path.exists():
+        print(f"{pb_path}: no such playbook file.")
+        return 1
+    pb = load_playbook(pb_path)
+    total = len(pb.get("instructions") or [])
+    state_path = pb_path.with_suffix(".state.json")
+    logs_dir = pb_path.parent / (pb_path.stem + ".logs")
+    pid_file = logs_dir / "run.pid"
+    log_file = logs_dir / "runner.log"
+
+    header, alive = _watch_status(pb_path, total, state_path, pid_file)
+    print(header)
+
+    fh = None
+    pos = 0
+    if log_file.exists():
+        try:
+            fh = open(log_file, "r", encoding="utf-8", errors="replace")
+            content = fh.read()
+            if content:
+                for line in content.splitlines()[-10:]:
+                    print(line)
+            pos = fh.tell()
+        except OSError:
+            fh = None
+
+    try:
+        while alive:
+            time.sleep(0.5)
+            alive = pid_alive(_read_pid_file(pid_file))
+            if fh is None and log_file.exists():
+                try:
+                    fh = open(log_file, "r", encoding="utf-8", errors="replace")
+                    pos = 0
+                except OSError:
+                    fh = None
+            if fh is not None:
+                fh.seek(pos)
+                new = fh.read()
+                if new:
+                    sys.stdout.write(new if new.endswith("\n") else new + "\n")
+                    sys.stdout.flush()
+                    pos = fh.tell()
+        # Drain: a line or two can land between the last poll and the process
+        # actually going away.
+        if fh is not None:
+            fh.seek(pos)
+            new = fh.read()
+            if new:
+                sys.stdout.write(new if new.endswith("\n") else new + "\n")
+    except KeyboardInterrupt:
+        print("\n[watch] interrupted — the run itself is untouched.")
+        return 130
+    finally:
+        if fh is not None:
+            fh.close()
+
+    final, _ = _watch_status(pb_path, total, state_path, pid_file)
+    print(final)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
 def main() -> int:
@@ -1259,6 +1374,9 @@ def main() -> int:
                     help="capture the current session into a ready-to-run playbook and exit")
     ap.add_argument("--detach", action="store_true",
                     help="run in the background, survive logout, log to the run's logfile")
+    ap.add_argument("--watch", action="store_true",
+                    help="attach read-only to this playbook's run and stream its log; "
+                         "exits on its own once the run is no longer alive")
     ap.add_argument("--agents", action="store_true",
                     help="list supported agents and whether their CLI is installed")
     ap.add_argument("--windows", action="store_true",
@@ -1286,6 +1404,10 @@ def main() -> int:
         return scaffold_playbook(Path("playbook.yaml"))
 
     pb_path = Path(os.path.expanduser(args.playbook))
+
+    # Read-only attach: never touch env/state/pid/log files, just observe them.
+    if args.watch:
+        return watch_playbook(pb_path)
 
     # Secrets: auto-load a .env file sitting next to the playbook. Real env
     # vars keep precedence; the detached child re-loads it itself.

@@ -54,6 +54,7 @@ agent-playbook playbook.yaml --detach      # background, survives logout
 agent-playbook playbook.yaml --dry-run     # print the plan, run nothing
 agent-playbook playbook.yaml --restart     # ignore saved progress, start over
 agent-playbook playbook.yaml --from 3      # start at instruction #3 (1-based)
+agent-playbook playbook.yaml --watch       # read-only: attach and stream a run's log
 ```
 `agent-playbook init` writes a starter that runs as-is — one haiku prompt that writes
 `hello.txt`, with a `verify:` line — so a brand-new user's first run succeeds in under
@@ -74,6 +75,19 @@ terminal via `DETACHED_PROCESS`, not `setsid`).
 on any OS, create a `stop.request` file in the run's `.logs` dir. The runner notices it
 within a few seconds (even while waiting out a usage-limit window), saves state, and
 exits; the next start resumes where it left off.
+
+**Watching a run:** `--watch` attaches read-only to a playbook's run (running,
+detached, or already finished) from a second terminal. It prints one status line —
+playbook path, phase (`not started`/`running`/`stopped`/`complete`, from `run.pid`
+liveness + saved state), instructions done of total, and cost so far — then streams
+`<playbook>.logs/runner.log` like `tail -f`, starting from its last 10 lines for
+context. It polls the file by position roughly twice a second (pure Python, no
+external tools) and exits on its own, printing a final status line, once the run is
+no longer alive; Ctrl-C exits immediately too. It never writes to state, pid, or log
+files — it only reads them. Because an agent's own output is written only once its
+attempt finishes (`promptNN.attemptM.log`), `--watch` shows the *runner's* log stream
+— phase changes, `DONE`/`FAILED` lines, usage-limit waits — not an agent's live
+keystrokes as it works.
 
 ## Run with Docker
 No local Python or Node needed — the image bundles the runner and the Claude Code CLI:
