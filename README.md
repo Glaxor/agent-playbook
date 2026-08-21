@@ -76,18 +76,12 @@ on any OS, create a `stop.request` file in the run's `.logs` dir. The runner not
 within a few seconds (even while waiting out a usage-limit window), saves state, and
 exits; the next start resumes where it left off.
 
-**Watching a run:** `--watch` attaches read-only to a playbook's run (running,
-detached, or already finished) from a second terminal. It prints one status line —
-playbook path, phase (`not started`/`running`/`stopped`/`complete`, from `run.pid`
-liveness + saved state), instructions done of total, and cost so far — then streams
-`<playbook>.logs/runner.log` like `tail -f`, starting from its last 10 lines for
-context. It polls the file by position roughly twice a second (pure Python, no
-external tools) and exits on its own, printing a final status line, once the run is
-no longer alive; Ctrl-C exits immediately too. It never writes to state, pid, or log
-files — it only reads them. Because an agent's own output is written only once its
-attempt finishes (`promptNN.attemptM.log`), `--watch` shows the *runner's* log stream
-— phase changes, `DONE`/`FAILED` lines, usage-limit waits — not an agent's live
-keystrokes as it works.
+**Watching a run:** `--watch` attaches read-only to a playbook's run from a second
+terminal — a status line (phase, progress, cost so far), then `runner.log` streamed
+like `tail -f`. That's the *runner's* log (phase changes, `DONE`/`FAILED` lines,
+usage-limit waits), not an agent's live keystrokes — per-attempt output only lands
+once an attempt finishes. It never writes to state, pid, or log files, so it's safe
+to Ctrl-C at any time; it just exits on its own once the run isn't alive anymore.
 
 ## Run with Docker
 No local Python or Node needed — the image bundles the runner and the Claude Code CLI:
