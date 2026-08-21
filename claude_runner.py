@@ -813,6 +813,66 @@ def tampered_protected_files(before: dict, protect: list, cwd: str | None) -> li
     return sorted(rels)
 
 
+def _last_log_lines(path: Path, n: int) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        return path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:]
+    except OSError:
+        return []
+
+
+def write_report(pb_path: Path, state_path: Path, instructions: list,
+                  instr_status: list, run_start: dt.datetime, outcome: str,
+                  gotos: int, total_cost_usd: float, logs_dir: Path) -> None:
+    """Write <playbook stem>.report.md next to the state file, overwriting any
+    old one. Called at the end of every run (complete, failed, budget stop, or
+    stop.request) — malformed entries are tolerated so a bad state file can
+    never turn a report problem into a run failure (the caller also wraps this
+    in try/except as a second line of defense)."""
+    run_end = dt.datetime.now()
+    secs = int((run_end - run_start).total_seconds())
+    lines = [
+        f"# Playbook report: {pb_path.name}",
+        "",
+        f"**Outcome:** {outcome}",
+        f"**Started:** {run_start.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**Ended:** {run_end.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"**Duration:** {secs // 60}m{secs % 60:02d}s",
+        "",
+        "| # | Kind | Label | Status | Attempts | Cost |",
+        "|---|------|-------|--------|----------|------|",
+    ]
+    for n, instr in enumerate(instructions, 1):
+        entry = instr_status[n - 1] if n - 1 < len(instr_status) else {}
+        if not isinstance(entry, dict):
+            entry = {}
+        status = str(entry.get("status") or "pending")
+        try:
+            attempts = int(entry.get("attempts") or 0)
+        except (TypeError, ValueError):
+            attempts = 0
+        try:
+            cost = float(entry.get("cost") or 0.0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        kind = instr_kind(instr) if isinstance(instr, dict) else "unknown"
+        label = (instr.get("label") if isinstance(instr, dict) else None) or "-"
+        lines.append(f"| {n} | {kind} | {label} | {status} | {attempts} | ${cost:.4f} |")
+
+    lines += ["", f"**Total cost:** ${float(total_cost_usd or 0.0):.4f}"]
+    if gotos:
+        lines.append(f"**Goto jumps:** {gotos}")
+
+    if not str(outcome).startswith("complete"):
+        tail = _last_log_lines(logs_dir / "runner.log", 5)
+        if tail:
+            lines += ["", "## Last log lines", "```", *tail, "```"]
+
+    report_path = state_path.with_name(pb_path.stem + ".report.md")
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def sleep_with_heartbeat(seconds: int, why: str) -> None:
     end = time.time() + seconds
     next_beat = 0.0
@@ -863,6 +923,7 @@ def run_prompt(prompt: str, opts: dict, limits: dict, sessions: dict,
 
     def done(res: dict) -> dict:
         res["cost"] = round(spent, 4)
+        res["attempts"] = attempt
         return res
 
     while True:
@@ -1332,14 +1393,35 @@ def main() -> int:
         return 0
 
     start = state.get("next_index", 0)
+
+    # Run report bookkeeping: one status entry per instruction, persisted in
+    # state so it survives across resumed runs; gotos initialized here (not
+    # just before the loop) so `finish` can read it from its very first call.
+    run_start = dt.datetime.now()
+    gotos = 0             # per-run jump budget (limits.max_gotos) — loop guard
+    instr_status = state.get("instr_status")
+    if not isinstance(instr_status, list):   # tolerate a corrupted state file
+        instr_status = []
+    state["instr_status"] = instr_status
+    while len(instr_status) < len(instructions):
+        instr_status.append({"status": "pending", "attempts": 0, "cost": 0.0})
+    del instr_status[len(instructions):]
+
+    def finish(code: int, outcome: str) -> int:
+        try:
+            write_report(pb_path, state_path, instructions, instr_status, run_start,
+                        outcome, gotos, state.get("total_cost_usd", 0.0), logs_dir)
+        except Exception as e:
+            log(f"[report] could not write report: {e}")
+        return code
+
     if start >= len(instructions):
         log(f"Nothing to do — all {len(instructions)} instructions already complete. "
             f"(use --restart to run again)")
-        return 0
+        return finish(0, "complete (nothing to do)")
     log(f"Playbook: {pb_path}  starting at instruction #{start + 1} of {len(instructions)}")
 
     i = start
-    gotos = 0            # per-run jump budget (limits.max_gotos) — loop guard
     try:
         while i < len(instructions):
             check_stop()
@@ -1356,6 +1438,7 @@ def main() -> int:
                                     encoding="utf-8", errors="replace")
                 if gp.returncode != 0:
                     log(f"== #{idx1} when: {gate}  (exit={gp.returncode}) — skipped")
+                    instr_status[i] = {"status": "skipped", "attempts": 0, "cost": 0.0}
                     i += 1
                     state["next_index"] = i
                     save_state(state_path, state)
@@ -1366,6 +1449,7 @@ def main() -> int:
                 text = str(instr["notify"])
                 log(f"== #{idx1} notify: {text}")
                 notifier.notify(text)
+                instr_status[i] = {"status": "done", "attempts": 0, "cost": 0.0}
 
             elif kind == "prompt":
                 spent_total = float(state.get("total_cost_usd", 0.0))
@@ -1377,7 +1461,7 @@ def main() -> int:
                     if notify_on_failure:
                         notifier.notify(msg, title="agent-playbook BUDGET")
                     save_state(state_path, state)
-                    return 1
+                    return finish(1, f"failed (budget exhausted) before prompt #{idx1}")
                 log(f"== #{idx1} prompt")
                 opts = merged_opts(instr, defaults)
                 sessions = state["sessions"] if session_mode == "keep" else {}
@@ -1402,6 +1486,10 @@ def main() -> int:
                     # legacy mirror of Claude's threaded session for older tooling
                     state["session_id"] = state["sessions"].get("claude")
 
+                instr_status[i] = {"status": "done" if res["ok"] else "failed",
+                                   "attempts": int(res.get("attempts") or 0),
+                                   "cost": round(float(res.get("cost") or 0.0), 4)}
+
                 if not res["ok"]:
                     err = (res.get("text") or "")[:300]
                     log(f"   FAILED prompt #{idx1} (exit={res.get('exit_code')}): {err}")
@@ -1418,7 +1506,7 @@ def main() -> int:
                             if notify_on_failure:
                                 notifier.notify(msg, title="agent-playbook FAILED")
                             save_state(state_path, state)
-                            return 1
+                            return finish(1, f"failed (goto limit reached) at prompt #{idx1}")
                         log(f"   on_fail: goto '{target}' (#{labels[target] + 1}) — "
                             f"jump {gotos}/{max_gotos}.")
                         i = labels[target]
@@ -1431,12 +1519,13 @@ def main() -> int:
                                             title="agent-playbook FAILED")
                         save_state(state_path, state)
                         log("Stopping on failure.")
-                        return 1
+                        return finish(1, f"failed at prompt #{idx1}")
                 else:
                     log(f"   DONE prompt #{idx1} [{res.get('agent')}]  "
                         f"turns={res.get('num_turns')} cost=${res.get('cost', 0):.4f}")
             else:
                 log(f"== #{idx1} UNKNOWN instruction skipped: {instr}")
+                instr_status[i] = {"status": "skipped", "attempts": 0, "cost": 0.0}
 
             i += 1
             state["next_index"] = i
@@ -1445,7 +1534,7 @@ def main() -> int:
         _STOP_FILE.unlink(missing_ok=True)
         save_state(state_path, state)
         log("[stop] stop requested — state saved; run again to resume.")
-        return 130
+        return finish(130, f"stopped (stop.request) before prompt #{i + 1}")
 
     log(f"== PLAYBOOK COMPLETE — {len(instructions)} instructions. "
         f"Total ${state['total_cost_usd']:.4f}")
@@ -1453,7 +1542,7 @@ def main() -> int:
         notifier.notify(
             f"playbook complete — {len(instructions)} instructions, "
             f"${state['total_cost_usd']:.4f}", title="agent-playbook done")
-    return 0
+    return finish(0, "complete")
 
 
 if __name__ == "__main__":

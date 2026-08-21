@@ -263,6 +263,10 @@ TELEGRAM_CHAT_ID=123456789
 - `<playbook>.logs/` — `runner.log` + raw `claude` output per prompt/attempt, plus
   `run.pid` (the single-runner lock: a second runner on the same playbook refuses to
   start, so two processes can never share one session).
+- `<playbook>.report.md` — written at the end of every run (complete, failed,
+  budget stop, or `stop.request`), overwriting the previous one: outcome, start/end
+  time and duration, a per-instruction table (status, attempts, cost), total cost,
+  and — on failure — the last few log lines.
 
 ## Things worth knowing
 - **No `--bare`, no API key**, on purpose: keeps the run on your OAuth login so it bills
