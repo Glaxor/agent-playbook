@@ -939,6 +939,39 @@ def instr_kind(instr: dict) -> str:
     return "unknown"
 
 
+def load_playbook(pb_path: Path) -> dict:
+    """Read and structurally validate the playbook. Exits with a clear message
+    on malformed input instead of surfacing a traceback."""
+    try:
+        pb = yaml.safe_load(pb_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as e:
+        sys.exit(f"{pb_path}: not valid YAML — {e}")
+    if pb is None:
+        sys.exit(f"{pb_path}: playbook is empty.")
+    if not isinstance(pb, dict):
+        sys.exit(f"{pb_path}: playbook must be a YAML mapping with top-level "
+                 f"keys like 'instructions:' (got {type(pb).__name__}).")
+    instructions = pb.get("instructions", [])
+    if not isinstance(instructions, list):
+        sys.exit(f"{pb_path}: 'instructions' must be a list.")
+    for n, instr in enumerate(instructions, 1):
+        if not isinstance(instr, dict):
+            sys.exit(f"{pb_path}: instruction #{n} must be a mapping like "
+                     f"'- prompt: ...' or '- notify: ...' (got: {instr!r}).")
+    for key in ("defaults", "limits", "notify"):
+        if pb.get(key) is not None and not isinstance(pb[key], dict):
+            sys.exit(f"{pb_path}: '{key}' must be a mapping.")
+    try:
+        float(pb.get("max_cost_usd", 0) or 0)
+    except (TypeError, ValueError):
+        sys.exit(f"{pb_path}: 'max_cost_usd' must be a number "
+                 f"(got: {pb.get('max_cost_usd')!r}).")
+    for k, v in (pb.get("limits") or {}).items():
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            sys.exit(f"{pb_path}: limits.{k} must be a number (got: {v!r}).")
+    return pb
+
+
 def parse_on_fail(instr: dict) -> tuple[str, str | None]:
     """Parse an instruction's on_fail into (policy, goto_label).
     Policies: stop (default) | continue | goto. Unrecognized -> ('invalid', None)."""
@@ -1070,7 +1103,7 @@ def main() -> int:
             print(f"  stop:  kill {proc.pid}")
         return 0
 
-    pb = yaml.safe_load(pb_path.read_text(encoding="utf-8"))
+    pb = load_playbook(pb_path)
     instructions = pb.get("instructions", [])
     defaults = pb.get("defaults", {})
     limits = pb.get("limits", {})
@@ -1232,10 +1265,20 @@ def main() -> int:
                 log(f"== #{idx1} prompt")
                 opts = merged_opts(instr, defaults)
                 sessions = state["sessions"] if session_mode == "keep" else {}
-                res = run_prompt(resolve_prompt_text(instr), opts, limits, sessions,
-                                 logs_dir, idx1, continue_on_limit=continue_on_limit,
-                                 budget_usd=(max_cost_usd - spent_total)
-                                 if max_cost_usd else None)
+                try:
+                    prompt_text = resolve_prompt_text(instr)
+                except OSError as e:
+                    # Missing/unreadable prompt_file is a normal prompt failure:
+                    # on_fail policy applies, no traceback.
+                    res = {"ok": False, "agent": None, "cost": 0.0,
+                           "num_turns": None, "exit_code": None,
+                           "text": f"cannot read prompt_file "
+                                   f"{instr.get('prompt_file')!r}: {e}"}
+                else:
+                    res = run_prompt(prompt_text, opts, limits, sessions,
+                                     logs_dir, idx1, continue_on_limit=continue_on_limit,
+                                     budget_usd=(max_cost_usd - spent_total)
+                                     if max_cost_usd else None)
 
                 state["total_cost_usd"] = round(
                     state.get("total_cost_usd", 0.0) + (res.get("cost") or 0.0), 4)
