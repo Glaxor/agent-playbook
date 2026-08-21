@@ -25,7 +25,10 @@ STUB_COMMON = '''\
 import json, os, sys
 
 FLAVOR = {flavor!r}
-prompt = sys.stdin.read()
+# The runner's contract is UTF-8 bytes on stdin (like the real Node CLIs);
+# decode explicitly so the stub doesn't fall back to the locale codepage.
+# Normalize CRLF like text mode would (Windows pipes deliver CRLF).
+prompt = sys.stdin.buffer.read().decode("utf-8").replace("\\r\\n", "\\n")
 plan_path = os.environ[FLAVOR.upper() + "_STUB_PLAN"]
 with open(plan_path) as f:
     plan = json.load(f)
