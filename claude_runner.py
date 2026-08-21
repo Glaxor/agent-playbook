@@ -956,6 +956,14 @@ def merged_opts(instr: dict, defaults: dict) -> dict:
 def main() -> int:
     global _LOG_FH, _STOP_FILE
 
+    # Consistent UTF-8 output on every platform: piped stdout on stock Windows
+    # defaults to the legacy codepage, which mangles the log's em-dashes etc.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     ap = argparse.ArgumentParser(description="Run an ordered Claude Code playbook.")
     ap.add_argument("playbook", nargs="?",
                     help="playbook file; if omitted, a starter playbook.yaml is generated")
