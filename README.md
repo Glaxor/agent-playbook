@@ -146,8 +146,10 @@ on the first pass gets fixed overnight instead of stopping the playbook:
 ```
 
 **`protect:`** — a list of files/globs (relative to the instruction's `cwd`) the
-agent must not touch, e.g. the test suite it's supposed to satisfy rather than
-edit:
+agent must not touch. Self-healing feeds verify failures back to the same
+agent, and a struggling agent can "fix" a failing test by editing the test
+instead of the code — `protect` closes that loophole by guarding the files
+the agent is supposed to satisfy, not rewrite:
 
 ```yaml
 instructions:
