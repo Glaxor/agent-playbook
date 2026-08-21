@@ -939,6 +939,45 @@ def instr_kind(instr: dict) -> str:
     return "unknown"
 
 
+# Legal keys per section — used only to WARN about unknown (likely typo'd)
+# keys, never to reject them, so future fields stay forward-compatible.
+_OPTS_KEYS = {"cwd", "allowed_tools", "permission_mode", "max_turns", "model",
+              "models", "verify", "agent", "fallback_agents", "codex_sandbox",
+              "timeout_min", "fix_attempts", "max_attempts"}
+_TOP_KEYS = {"session", "continue_on_limit", "notify_on_finish",
+             "notify_on_failure", "notify_backend", "notify", "defaults",
+             "limits", "instructions", "max_cost_usd", "resume_session"}
+_INSTR_KEYS = _OPTS_KEYS | {"prompt", "prompt_file", "notify", "label",
+                            "when", "on_fail"}
+_LIMITS_KEYS = {"poll_interval_sec", "resume_poll_sec", "transient_base_sec",
+                "transient_max_sec", "transient_max_retries",
+                "usage_max_wait_sec", "timeout_max_retries", "max_gotos"}
+_NOTIFY_KEYS = {"telegram_bot_token_env", "telegram_chat_id_env",
+                "ntfy_topic", "ntfy_server"}
+
+
+def unknown_key_warnings(pb: dict) -> list[str]:
+    """Warnings for keys the runner will silently ignore (usually typos),
+    with a did-you-mean suggestion where one is close enough."""
+    import difflib
+    warnings: list[str] = []
+
+    def check(mapping: dict, legal: set, where: str) -> None:
+        for k in mapping:
+            if k not in legal:
+                close = difflib.get_close_matches(str(k), legal, n=1)
+                hint = f" — did you mean '{close[0]}'?" if close else ""
+                warnings.append(f"{where}: unknown key '{k}' (ignored){hint}")
+
+    check(pb, _TOP_KEYS, "playbook")
+    check(pb.get("defaults") or {}, _OPTS_KEYS, "defaults")
+    check(pb.get("limits") or {}, _LIMITS_KEYS, "limits")
+    check(pb.get("notify") or {}, _NOTIFY_KEYS, "notify")
+    for n, instr in enumerate(pb.get("instructions") or [], 1):
+        check(instr, _INSTR_KEYS, f"instruction #{n}")
+    return warnings
+
+
 def load_playbook(pb_path: Path) -> dict:
     """Read and structurally validate the playbook. Exits with a clear message
     on malformed input instead of surfacing a traceback."""
@@ -1030,6 +1069,8 @@ def main() -> int:
                     help="playbook file; if omitted, a starter playbook.yaml is generated")
     ap.add_argument("--state", help="state file (default: <playbook>.state.json)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
+    ap.add_argument("--strict", action="store_true",
+                    help="treat unknown-key warnings as errors (for CI)")
     ap.add_argument("--from", dest="start_from", type=int,
                     help="start at instruction N (1-based)")
     ap.add_argument("--restart", action="store_true", help="ignore saved progress")
@@ -1104,6 +1145,11 @@ def main() -> int:
         return 0
 
     pb = load_playbook(pb_path)
+    key_warnings = unknown_key_warnings(pb)
+    for w in key_warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    if key_warnings and args.strict:
+        sys.exit(f"{len(key_warnings)} unknown key(s) — failing because of --strict.")
     instructions = pb.get("instructions", [])
     defaults = pb.get("defaults", {})
     limits = pb.get("limits", {})

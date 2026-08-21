@@ -1,0 +1,115 @@
+# ---------------------------------------------------------------------------
+# STRESS-TEST PLAYBOOK — exercises every feature of agent-playbook at once.
+# Validate:  agent-playbook playbook.yaml --dry-run --strict
+# Run it against a scratch directory only: it scaffolds, loops, and reverts.
+#
+# Features under test:
+#   session threading, budget cap, per-instruction overrides, when-gates,
+#   verify + self-healing fix_attempts, on_fail continue/goto (forward AND
+#   backward), the max_gotos loop guard, prompt_file, fallback agent chains
+#   with per-agent models, notify gating, and fall-through protection.
+# ---------------------------------------------------------------------------
+
+session: keep
+continue_on_limit: true
+notify_backend: ntfy
+notify_on_finish: true
+notify_on_failure: true
+max_cost_usd: 25            # hard ceiling for the whole pipeline
+
+notify:
+  ntfy_topic: stress-test-run
+
+defaults:
+  cwd: ~/projects/stress-target
+  permission_mode: dontAsk
+  allowed_tools: [Read, Write, Edit, "Bash(python:*)", "Bash(git:*)", "Bash(pip:*)"]
+  max_turns: 60
+  timeout_min: 45           # stalled agent -> whole process tree killed, retried
+  max_attempts: 12          # runaway guard per prompt
+  fix_attempts: 2           # verify failures are fed back for self-repair
+  agent: claude
+  fallback_agents: [codex, gemini]   # usage limit -> hand the SAME prompt over
+  models:
+    claude: sonnet
+    codex: gpt-5-codex
+    gemini: gemini-2.5-pro
+
+limits:
+  resume_poll_sec: 20
+  poll_interval_sec: 240
+  transient_max_retries: 4
+  usage_max_wait_sec: 43200
+  max_gotos: 8              # bounds the backward-goto retry loop below
+
+instructions:
+  # -- 0: bootstrap — idempotent: skipped entirely once the repo exists -------
+  - label: bootstrap
+    when: "test ! -d .git"
+    prompt: >
+      Initialize this directory as a git repository containing a Python package
+      named 'stress' with a src/ layout: pyproject.toml, src/stress/__init__.py,
+      a src/stress/core.py with a pure-function stub, and a pytest suite under
+      tests/ that passes. Commit everything as 'scaffold'. Be idempotent: if any
+      of this already exists, complete only what is missing.
+    verify: "python -m pytest -q"
+    on_fail: goto abort
+
+  # -- 1: the retry loop -------------------------------------------------------
+  # 'feature' jumps BACKWARD to 'reset-workspace' on failure: revert, then fall
+  # through into 'feature' again. max_gotos: 8 turns an infinite loop into a
+  # bounded retry budget. reset-workspace's gate makes it a no-op if the failed
+  # attempt left the tree clean.
+  - label: reset-workspace
+    when: "git status --porcelain | grep -q ."
+    prompt: "Revert every uncommitted change (tracked and untracked). Keep committed work intact. Do nothing else."
+    max_turns: 15
+    on_fail: goto abort
+
+  - label: feature
+    prompt_file: ./prompts/feature-batch.md
+    verify: "python -m pytest -q && python -m mypy src/stress --strict"
+    fix_attempts: 3         # override: three self-repair rounds for the hard step
+    max_turns: 80
+    timeout_min: 90
+    on_fail: goto reset-workspace
+
+  - notify: "stress: feature batch green (pytest + strict mypy)"
+
+  # -- 2: nice-to-haves — failures must not stop the pipeline ------------------
+  - prompt: "Update CHANGELOG.md with an entry for the feature batch, inferring the changes from git log since the scaffold commit."
+    agent: gemini           # per-instruction agent override (stateless)
+    max_turns: 12
+    on_fail: continue
+
+  - prompt: "Refactor src/stress for readability until pylint scores at least 9.5. Do not change public behavior."
+    verify: "python -m pylint src/stress --fail-under=9.5"
+    fix_attempts: 1
+    on_fail: continue
+
+  # -- 3: release gate — only if the suite is still green ----------------------
+  - label: release
+    when: "python -m pytest -q"
+    prompt: >
+      Bump the version to the next minor in pyproject.toml, build sdist+wheel
+      with 'python -m build', and commit and tag the release as vNEXT.
+      Idempotent: if the tag for the current version already exists, do nothing.
+    verify: "python -m twine check dist/*"
+    max_attempts: 4
+    on_fail: goto abort
+
+  - when: "git tag --list 'v*' | grep -q ."
+    notify: "stress: release candidate built and tagged"
+
+  # -- 4: happy end — jump OVER the failure section ----------------------------
+  # Without gates, the happy path would fall straight through into 'abort'
+  # (classic goto semantics). Both failure steps are gated so they are inert
+  # unless something actually went wrong.
+  - label: abort
+    when: "git status --porcelain | grep -q ."
+    prompt: "The pipeline failed. Revert all uncommitted changes and write POSTMORTEM.md describing what was attempted and what failed, based on git log and the working tree."
+    max_turns: 20
+    on_fail: continue       # even a failing postmortem must not block the final ping
+
+  - when: "test -f POSTMORTEM.md"
+    notify: "stress: pipeline hit the failure path — read POSTMORTEM.md"

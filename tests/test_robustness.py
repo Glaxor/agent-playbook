@@ -170,3 +170,59 @@ def test_unicode_prompt_survives_stdin(stub, tmp_path):
     r = run_runner([str(pb)], tmp_path, stub.env())
     assert r.returncode == 0, r.stdout + r.stderr
     assert stub.calls()[0]["prompt"] == text
+
+
+# --------------------------------------------------------------------------- #
+# Unknown-key (typo) warnings
+# --------------------------------------------------------------------------- #
+def test_typo_key_warns_with_suggestion_but_runs(stub, tmp_path):
+    stub.set_plan([{"kind": "success"}])
+    pb = write_playbook(tmp_path / "pb.yaml",
+                        [{"prompt": "go", "on_fial": "continue"}])
+    r = run_runner([str(pb)], tmp_path, stub.env())
+    assert r.returncode == 0, r.stdout + r.stderr        # warn, don't block
+    assert "unknown key 'on_fial'" in r.stderr
+    assert "did you mean 'on_fail'" in r.stderr
+
+
+def test_strict_makes_typo_fatal(stub, tmp_path):
+    pb = write_playbook(tmp_path / "pb.yaml",
+                        [{"prompt": "go", "promt_file": "x.md"}])
+    r = run_runner([str(pb), "--strict"], tmp_path, stub.env())
+    assert r.returncode != 0
+    assert "unknown key 'promt_file'" in r.stderr
+    assert len(stub.calls()) == 0
+
+
+def test_typos_in_all_sections_are_flagged(stub, tmp_path):
+    stub.set_plan([{"kind": "success"}])
+    pb = write_playbook(tmp_path / "pb.yaml", [{"prompt": "go"}],
+                        sessoin="keep",
+                        defaults={"cwd": str(tmp_path), "permision_mode": "dontAsk"},
+                        limits={"poll_interval_sec": 1, "resume_poll_sec": 1,
+                                "transient_base_sec": 0, "max_gotoz": 5})
+    r = run_runner([str(pb)], tmp_path, stub.env())
+    assert r.returncode == 0
+    assert "playbook: unknown key 'sessoin'" in r.stderr
+    assert "defaults: unknown key 'permision_mode'" in r.stderr
+    assert "limits: unknown key 'max_gotoz'" in r.stderr
+
+
+def test_clean_playbook_has_no_warnings(stub, tmp_path):
+    stub.set_plan([{"kind": "success"}])
+    pb = write_playbook(tmp_path / "pb.yaml", [
+        {"label": "a", "prompt": "go", "when": "exit 0", "on_fail": "goto a",
+         "verify": "exit 0", "fix_attempts": 0},
+    ])
+    r = run_runner([str(pb)], tmp_path, stub.env())
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "unknown key" not in r.stderr
+
+
+def test_dry_run_also_warns(stub, tmp_path):
+    pb = write_playbook(tmp_path / "pb.yaml",
+                        [{"prompt": "go", "labell": "x"}])
+    r = run_runner([str(pb), "--dry-run"], tmp_path, stub.env())
+    assert r.returncode == 0
+    assert "unknown key 'labell'" in r.stderr
+    assert "did you mean 'label'" in r.stderr

@@ -52,6 +52,12 @@ agent-playbook playbook.yaml --dry-run     # print the plan, run nothing
 agent-playbook playbook.yaml --restart     # ignore saved progress, start over
 agent-playbook playbook.yaml --from 3      # start at instruction #3 (1-based)
 ```
+`--dry-run` doubles as the **playbook validator**: it checks structure and types,
+labels and `on_fail` targets, and agent names — and warns about unknown (typo'd)
+keys with a did-you-mean suggestion (`on_fial` → *did you mean 'on_fail'?*).
+Unknown keys only warn, so playbooks stay forward-compatible; add `--strict` to
+turn those warnings into errors (useful in CI).
+
 `--detach` prints the pid + tail/stop commands and logs to `playbook.logs/runner.log`.
 Works on Linux, macOS, and Windows (on Windows the detached run survives closing the
 terminal via `DETACHED_PROCESS`, not `setsid`).
