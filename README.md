@@ -131,6 +131,43 @@ on the first pass gets fixed overnight instead of stopping the playbook:
    DONE prompt #3 [claude]
 ```
 
+## Control flow (`on_fail`, `label`, `when`)
+
+By default a hard-failed prompt stops the playbook. For unattended runs you can
+declare what should happen instead — per instruction:
+
+```yaml
+instructions:
+  - prompt: "Attempt the risky refactor. Commit only if tests pass."
+    verify: "npm test"
+    on_fail: goto cleanup     # stop (default) | continue | goto <label>
+
+  - prompt: "Build on the refactor."      # skipped if the goto fires
+
+  - label: cleanup
+    when: "git status --porcelain | grep -q ."   # gate: run only if dirty
+    prompt: "Revert uncommitted changes and file an issue describing the failure."
+
+  - notify: "run finished — check the branch"
+    on_fail: continue
+```
+
+- **`on_fail`** — `continue` logs the failure and moves on; `goto <label>` jumps
+  to the labeled instruction (forward or backward). Failed `verify:` (after its
+  `fix_attempts` are exhausted) follows the same policy. Only `stop` sends the
+  failure notification — `continue`/`goto` just log.
+- **`label`** — names an instruction as a goto target. Duplicate labels and
+  gotos to unknown labels are rejected at startup, before anything runs.
+- **`when`** — a shell command gating the instruction (any kind): non-zero exit
+  skips it. The cheap way to make re-entry idempotent ("skip if the artifact
+  already exists") without spending an agent call.
+- **Loop guard** — jumps are capped per run (`limits: {max_gotos: 20}` to tune);
+  exceeding the cap stops the playbook with a notification.
+
+Deliberately *not* included: variables, expressions, parallel steps. The
+playbook stays a schedule + safety harness — complex logic belongs in the
+prompt or in a `verify:`/`when:` script.
+
 ## Multiple agents (Claude, Codex, Gemini)
 
 The runner can drive more than one CLI coding agent — useful when you hold several

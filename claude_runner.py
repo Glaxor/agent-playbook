@@ -939,6 +939,34 @@ def instr_kind(instr: dict) -> str:
     return "unknown"
 
 
+def parse_on_fail(instr: dict) -> tuple[str, str | None]:
+    """Parse an instruction's on_fail into (policy, goto_label).
+    Policies: stop (default) | continue | goto. Unrecognized -> ('invalid', None)."""
+    raw = str(instr.get("on_fail", "stop")).strip()
+    if raw in ("stop", "continue"):
+        return raw, None
+    if raw.startswith("goto"):
+        label = raw[len("goto"):].strip(" :")
+        if label:
+            return "goto", label
+    return "invalid", None
+
+
+def build_labels(instructions: list) -> dict[str, int]:
+    """Map label -> 0-based instruction index; exits on duplicates."""
+    labels: dict[str, int] = {}
+    for n, instr in enumerate(instructions, 1):
+        lbl = instr.get("label")
+        if lbl is None:
+            continue
+        lbl = str(lbl)
+        if lbl in labels:
+            sys.exit(f"Duplicate label '{lbl}' "
+                     f"(instructions #{labels[lbl] + 1} and #{n}).")
+        labels[lbl] = n - 1
+    return labels
+
+
 def merged_opts(instr: dict, defaults: dict) -> dict:
     opts = dict(defaults)
     for k in ("cwd", "allowed_tools", "permission_mode", "max_turns", "model",
@@ -1066,6 +1094,18 @@ def main() -> int:
                          f"Available: {', '.join(sorted(ADAPTERS))} "
                          f"(see: agent-playbook --agents)")
 
+    # Control flow: resolve labels and fail fast on bad on_fail values.
+    labels = build_labels(instructions)
+    for n, instr in enumerate(instructions, 1):
+        if "on_fail" not in instr:
+            continue
+        policy, target = parse_on_fail(instr)
+        if policy == "invalid" or (policy == "goto" and target not in labels):
+            sys.exit(f"Instruction #{n}: on_fail must be 'stop', 'continue', or "
+                     f"'goto <label>' naming an existing label "
+                     f"(got: {instr['on_fail']!r}).")
+    max_gotos = int(limits.get("max_gotos", 20))
+
     state_path = Path(args.state) if args.state else pb_path.with_suffix(".state.json")
     state = fresh_state() if args.restart else load_state(state_path)
     if args.start_from is not None:
@@ -1123,13 +1163,20 @@ def main() -> int:
         log(f"Playbook: {pb_path}  ({len(instructions)} instructions)  session={session_mode}")
         for i, instr in enumerate(instructions, 1):
             kind = instr_kind(instr)
+            flow = ""
+            if instr.get("label"):
+                flow += f" [label: {instr['label']}]"
+            if instr.get("when"):
+                flow += f" [when: {str(instr['when'])[:30]}]"
+            if "on_fail" in instr:
+                flow += f" [on_fail: {instr['on_fail']}]"
             if kind == "prompt":
                 snip = resolve_prompt_text(instr, resolve_file=False).replace("\n", " ")[:70]
                 chain = agent_chain(merged_opts(instr, defaults))
                 note = "" if chain == ["claude"] else f" [{' -> '.join(chain)}]"
-                log(f"  {i:>2}. prompt{note}  — {snip}")
+                log(f"  {i:>2}. prompt{note}{flow}  — {snip}")
             elif kind == "notify":
-                log(f"  {i:>2}. notify  — {str(instr['notify'])[:70]}")
+                log(f"  {i:>2}. notify{flow}  — {str(instr['notify'])[:70]}")
             else:
                 log(f"  {i:>2}. UNKNOWN — {instr}")
         log("Dry run complete. Nothing was executed.")
@@ -1143,12 +1190,28 @@ def main() -> int:
     log(f"Playbook: {pb_path}  starting at instruction #{start + 1} of {len(instructions)}")
 
     i = start
+    gotos = 0            # per-run jump budget (limits.max_gotos) — loop guard
     try:
         while i < len(instructions):
             check_stop()
             instr = instructions[i]
             kind = instr_kind(instr)
             idx1 = i + 1
+
+            gate = instr.get("when")
+            if gate:
+                gate_cwd = os.path.expanduser(
+                    str(instr.get("cwd") or defaults.get("cwd") or ".")) or None
+                gp = subprocess.run(str(gate), cwd=gate_cwd, shell=True,
+                                    capture_output=True, text=True,
+                                    encoding="utf-8", errors="replace")
+                if gp.returncode != 0:
+                    log(f"== #{idx1} when: {gate}  (exit={gp.returncode}) — skipped")
+                    i += 1
+                    state["next_index"] = i
+                    save_state(state_path, state)
+                    continue
+                log(f"== #{idx1} when: {gate}  (passed)")
 
             if kind == "notify":
                 text = str(instr["notify"])
@@ -1183,14 +1246,36 @@ def main() -> int:
                 if not res["ok"]:
                     err = (res.get("text") or "")[:300]
                     log(f"   FAILED prompt #{idx1} (exit={res.get('exit_code')}): {err}")
-                    if notify_on_failure:
-                        notifier.notify(f"prompt #{idx1} failed:\n{err}", title="agent-playbook FAILED")
-                    save_state(state_path, state)
-                    log("Stopping on failure.")
-                    return 1
-
-                log(f"   DONE prompt #{idx1} [{res.get('agent')}]  turns={res.get('num_turns')} "
-                    f"cost=${res.get('cost', 0):.4f}")
+                    policy, target = parse_on_fail(instr)
+                    if policy == "continue":
+                        log("   on_fail: continue — moving on.")
+                    elif policy == "goto":
+                        gotos += 1
+                        if gotos > max_gotos:
+                            msg = (f"goto limit reached ({max_gotos} jumps) at prompt "
+                                   f"#{idx1} — stopping to avoid a loop "
+                                   f"(raise limits.max_gotos to allow more).")
+                            log(f"   {msg}")
+                            if notify_on_failure:
+                                notifier.notify(msg, title="agent-playbook FAILED")
+                            save_state(state_path, state)
+                            return 1
+                        log(f"   on_fail: goto '{target}' (#{labels[target] + 1}) — "
+                            f"jump {gotos}/{max_gotos}.")
+                        i = labels[target]
+                        state["next_index"] = i
+                        save_state(state_path, state)
+                        continue
+                    else:
+                        if notify_on_failure:
+                            notifier.notify(f"prompt #{idx1} failed:\n{err}",
+                                            title="agent-playbook FAILED")
+                        save_state(state_path, state)
+                        log("Stopping on failure.")
+                        return 1
+                else:
+                    log(f"   DONE prompt #{idx1} [{res.get('agent')}]  "
+                        f"turns={res.get('num_turns')} cost=${res.get('cost', 0):.4f}")
             else:
                 log(f"== #{idx1} UNKNOWN instruction skipped: {instr}")
 
