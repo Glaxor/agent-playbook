@@ -1,0 +1,132 @@
+# ---------------------------------------------------------------------------
+# DEPENDENCY UPGRADE — safely upgrade a Python project's dependencies overnight.
+# Validate:  agent-playbook playbook.yaml --dry-run --strict   (from this dir)
+#
+# Strategy:
+#   1. audit    — list outdated packages, rank them into three risk tiers
+#                 (patch / minor / major) in UPGRADE-PLAN.md, least risky first.
+#   2. batches  — upgrade one tier at a time. Each batch runs the test suite
+#                 as `verify:`; a failing suite is fed back to the SAME agent
+#                 for up to `fix_attempts` self-repair rounds before the batch
+#                 counts as failed. A batch that finishes green commits its
+#                 own changes, so later batches build on a known-good state.
+#   3. rollback — any batch (or the audit step) that still fails after its
+#                 repair rounds jumps here via `on_fail: goto rollback`. It
+#                 reverts only the UNCOMMITTED work (earlier green batches
+#                 stay committed) and writes UPGRADE-NOTES.md explaining what
+#                 was attempted and why it failed.
+#   4. notify   — exactly one of the two `notify:` steps near the end fires:
+#                 success if every batch went green, failure if rollback ran.
+#
+# PORTABILITY NOTE: every `when:`/`verify:` command below is POSIX shell
+# (git-bash/WSL/macOS/Linux) — the runner executes them with `shell=True`,
+# which is cmd.exe on stock Windows and won't understand `grep`/`test`/`&&`
+# the same way. Run this playbook from git-bash/WSL, or rewrite the gate
+# commands for PowerShell before using it on stock Windows.
+# ---------------------------------------------------------------------------
+
+session: keep               # one threaded Claude session across every step —
+                             # later batches remember earlier ones' context
+continue_on_limit: true      # usage limit mid-run? wait for the reset, then
+                             # continue the SAME prompt rather than giving up
+notify_on_finish: true       # belt-and-braces ping even on an unexpected stop
+notify_on_failure: true      # e.g. a hard stop or the max_gotos guard tripping
+notify_backend: ntfy         # telegram | ntfy | none — see the README
+
+notify:
+  ntfy_topic: dependency-upgrade-run   # export NTFY_TOPIC to override per-run
+
+max_cost_usd: 15             # hard ceiling for the whole overnight run
+
+defaults:
+  cwd: ~/projects/my-python-app        # <-- point this at your checkout
+  permission_mode: dontAsk
+  allowed_tools: [Read, Write, Edit, "Bash(pip:*)", "Bash(python:*)", "Bash(git:*)"]
+  max_turns: 40
+  timeout_min: 45             # a stalled pip/agent call is killed + retried once
+  max_attempts: 8              # runaway guard per prompt
+  fix_attempts: 2              # self-healing: feed failing test output back
+
+limits:
+  max_gotos: 5                # bounds the audit/batch -> rollback jump budget
+
+instructions:
+  # -- 0: audit — rank outdated packages least- to most-risky -----------------
+  - label: audit
+    when: "test ! -f UPGRADE-PLAN.md"    # idempotent: skip if already audited
+    prompt: >
+      Run `pip list --outdated` (use `pip-audit` too if it is installed) and
+      write UPGRADE-PLAN.md: a ranked list of every outdated package, grouped
+      into three tiers in this order — "patch" (bugfix-only bumps), "minor"
+      (backwards-compatible feature bumps), "major" (potentially breaking).
+      For each package note its current and target version and one line on
+      why it's in that tier. Do not upgrade or install anything yet.
+    verify: "test -f UPGRADE-PLAN.md"
+    on_fail: goto rollback
+
+  # -- 1: batch 1 — patch-level bumps (lowest risk) ----------------------------
+  - label: batch-patch
+    prompt: >
+      From UPGRADE-PLAN.md's "patch" tier only, upgrade each listed package to
+      its target version (pip install --upgrade, then update requirements.txt
+      / pyproject.toml pins). Do not touch packages from the minor or major
+      tiers. If the full test suite passes, commit with a message listing the
+      packages and versions bumped. Idempotent: if this tier is already at its
+      target versions and committed, do nothing.
+    protect: ["tests/**"]      # a struggling agent must fix the code, not the tests
+    verify: "python -m pytest -q"
+    fix_attempts: 2
+    on_fail: goto rollback
+
+  # -- 2: batch 2 — minor-version bumps (moderate risk) ------------------------
+  - label: batch-minor
+    prompt: >
+      From UPGRADE-PLAN.md's "minor" tier only, upgrade each listed package to
+      its target version and update requirements.txt / pyproject.toml pins.
+      Do not touch the major tier. If the full test suite passes, commit with
+      a message listing the packages and versions bumped. Idempotent: if this
+      tier is already at its target versions and committed, do nothing.
+    protect: ["tests/**"]
+    verify: "python -m pytest -q"
+    fix_attempts: 2
+    on_fail: goto rollback
+
+  # -- 3: batch 3 — major-version bumps (highest risk, most self-heal room) ---
+  - label: batch-major
+    prompt: >
+      From UPGRADE-PLAN.md's "major" tier only, upgrade each listed package to
+      its target version, update requirements.txt / pyproject.toml pins, and
+      fix any breaking-change fallout in the codebase (consult each package's
+      changelog for migration notes). If the full test suite passes, commit
+      with a message listing the packages and versions bumped, and note any
+      follow-up manual review the changelog recommends in UPGRADE-PLAN.md.
+      Idempotent: if this tier is already at its target versions and
+      committed, do nothing.
+    protect: ["tests/**"]
+    verify: "python -m pytest -q"
+    fix_attempts: 3            # riskiest tier gets one extra self-repair round
+    max_turns: 60
+    on_fail: goto rollback
+
+  # -- 4: happy end — every batch upgraded and green ---------------------------
+  - notify: "dependency-upgrade: all batches upgraded, tests green, changes committed"
+
+  # -- 5: rollback — only reached via on_fail: goto, or falls through inert ---
+  # Without the `when` gate this would run unconditionally after the happy
+  # path too (classic goto/fall-through semantics) — the gate makes it a
+  # no-op once the tree is clean, exactly like the happy-path notify above.
+  - label: rollback
+    when: "git status --porcelain | grep -q ."
+    prompt: >
+      A dependency-upgrade batch failed its test suite and could not be
+      self-repaired. Revert every uncommitted change (tracked and untracked)
+      so the tree matches the last successfully committed batch — do not
+      touch already-committed upgrades. Then write UPGRADE-NOTES.md
+      summarizing, based on git log and the working tree: which batch failed,
+      which package(s) it was upgrading, the tail of the test failure output,
+      and which tiers (if any) upgraded successfully before it.
+    max_turns: 20
+    on_fail: continue          # even a failing rollback must not block the ping
+
+  - when: "test -f UPGRADE-NOTES.md"
+    notify: "dependency-upgrade: a batch failed and was rolled back — see UPGRADE-NOTES.md"
