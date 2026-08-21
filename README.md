@@ -45,6 +45,7 @@ passes straight through to the real binary. (`--playbook` must be the first argu
 ```bash
 claude login                              # be authenticated (uses your Max plan)
 
+agent-playbook init                        # create a small, runnable starter playbook.yaml
 claude --playbook                          # no file -> generate a starter playbook.yaml
 agent-playbook playbook.yaml               # run
 agent-playbook playbook.yaml --detach      # background, survives logout
@@ -52,6 +53,11 @@ agent-playbook playbook.yaml --dry-run     # print the plan, run nothing
 agent-playbook playbook.yaml --restart     # ignore saved progress, start over
 agent-playbook playbook.yaml --from 3      # start at instruction #3 (1-based)
 ```
+`agent-playbook init` writes a starter that runs as-is — one haiku prompt that writes
+`hello.txt`, with a `verify:` line — so a brand-new user's first run succeeds in under
+two minutes with zero edits. (The no-file scaffold above writes a placeholder prompt
+you're expected to fill in before running.)
+
 `--dry-run` doubles as the **playbook validator**: it checks structure and types,
 labels and `on_fail` targets, and agent names — and warns about unknown (typo'd)
 keys with a did-you-mean suggestion (`on_fial` → *did you mean 'on_fail'?*).

@@ -17,6 +17,7 @@ LIMITS
     backoff.
 
 USAGE
+    agent-playbook init                          # create a small, runnable starter playbook.yaml
     agent-playbook playbook.yaml                # run
     agent-playbook playbook.yaml --detach       # background, survives logout
     agent-playbook playbook.yaml --dry-run      # print the plan, run nothing
@@ -372,6 +373,29 @@ instructions:
 """
 
 
+INIT_TEMPLATE = """\
+# playbook.yaml — a small, runnable starter. Try it as-is:
+#   agent-playbook playbook.yaml --dry-run   # see the plan, run nothing
+#   agent-playbook playbook.yaml             # run it for real
+# Then edit the prompt below for your own task.
+
+session: keep
+continue_on_limit: true
+notify_on_finish: true
+notify_backend: none      # none | telegram | ntfy  (set this to actually receive pings)
+
+defaults:
+  cwd: .
+  permission_mode: dontAsk
+  allowed_tools: [Write]
+  model: haiku              # fast + cheap: keeps this starter run under two minutes
+
+instructions:
+  - prompt: "Write a file named hello.txt containing exactly the line: hello from agent-playbook"
+    verify: python -c "open('hello.txt').read()"
+"""
+
+
 HANDOFF_TEMPLATE = """\
 # playbook.yaml — pinned to an existing Claude Code session.
 # Edit the prompt if you like, then:  agent-playbook {name} --detach
@@ -417,6 +441,22 @@ def scaffold_playbook(target: Path) -> int:
     target.write_text(PLAYBOOK_TEMPLATE, encoding="utf-8")
     print(f"Created {target}")
     print("Edit the `instructions` (and notify_backend if you want pings), then run:")
+    print(f"  agent-playbook {target}")
+    return 0
+
+
+def init_scaffold(target: Path) -> int:
+    """Like scaffold_playbook, but the template is small and runnable as-is
+    (one haiku prompt that writes hello.txt) so a brand-new user's first run
+    succeeds in under two minutes with zero edits required."""
+    if target.exists():
+        print(f"{target} already exists — not overwriting.")
+        print(f"Edit it, then run:  agent-playbook {target}")
+        return 0
+    target.write_text(INIT_TEMPLATE, encoding="utf-8")
+    print(f"Created {target} — a small, runnable starter.")
+    print("Try it, then run it for real:")
+    print(f"  agent-playbook {target} --dry-run")
     print(f"  agent-playbook {target}")
     return 0
 
@@ -1201,7 +1241,8 @@ def main() -> int:
 
     ap = argparse.ArgumentParser(description="Run an ordered Claude Code playbook.")
     ap.add_argument("playbook", nargs="?",
-                    help="playbook file; if omitted, a starter playbook.yaml is generated")
+                    help="playbook file; if omitted, a starter playbook.yaml is generated. "
+                         "'init' generates a small, runnable starter and exits")
     ap.add_argument("--state", help="state file (default: <playbook>.state.json)")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, run nothing")
     ap.add_argument("--strict", action="store_true",
@@ -1232,6 +1273,9 @@ def main() -> int:
 
     if args.list_sessions is not None:
         return list_sessions(args.list_sessions)
+
+    if args.playbook == "init" and not args.handoff:
+        return init_scaffold(Path("playbook.yaml"))
 
     if args.handoff:
         target = Path(os.path.expanduser(args.playbook)) if args.playbook else Path("playbook.yaml")
