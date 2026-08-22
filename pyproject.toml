@@ -1,6 +1,6 @@
 [project]
 name = "llm-agent-playbook"
-version = "0.6.0"
+version = "0.7.0"
 description = "A programmable layer for unattended AI coding work: drive Claude Code, Codex, and Gemini CLIs from a YAML playbook with verify/repair loops, budgets, cross-agent fallback, and usage-window riding."
 readme = "README.md"
 license = { file = "LICENSE" }
